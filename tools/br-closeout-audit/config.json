@@ -1,0 +1,132 @@
+{
+  "defaults": {
+    "default_since_rev": "HEAD~20",
+    "default_limit": 10,
+    "meta_globs": [
+      ".beads/**",
+      ".beads/.br_history/**",
+      ".ntm/**",
+      "screenshots/**",
+      "**/*.png",
+      "**/*.jpg",
+      "**/*.jpeg",
+      "**/*.gif",
+      "**/*.webp"
+    ],
+    "close_commit_meta_prefixes": [
+      "chore: close ",
+      "chore: sync beads",
+      "chore: stage beads history cleanup"
+    ],
+    "labels": {
+      "verification": [
+        "verification",
+        "verify"
+      ],
+      "migration": [
+        "database",
+        "db",
+        "migration",
+        "schema"
+      ],
+      "test": [
+        "testing",
+        "test",
+        "tests"
+      ],
+      "docs": [
+        "docs",
+        "documentation"
+      ]
+    },
+    "mode_rules": {
+      "migration": {
+        "require_path_sets": [
+          {
+            "label": "schema",
+            "globs": [
+              "**/schema.prisma",
+              "**/schema.sql",
+              "**/db/schema.rb",
+              "**/ent/schema/**",
+              "**/sql/schema/**",
+              "**/database/schema/**"
+            ]
+          },
+          {
+            "label": "migration",
+            "globs": [
+              "**/prisma/migrations/**",
+              "**/migrations/**",
+              "**/db/migrate/**",
+              "**/db/migrations/**",
+              "**/migrate/**",
+              "**/database/migrations/**"
+            ]
+          }
+        ]
+      },
+      "test": {
+        "require_any_globs": [
+          "**/__tests__/**",
+          "**/tests/**",
+          "**/test/**",
+          "**/*_test.go",
+          "**/*_test.py",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.test.js",
+          "**/*.test.jsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.spec.js",
+          "**/*.spec.jsx"
+        ]
+      },
+      "verification": {
+        "require_close_reason_evidence": true,
+        "evidence_tokens": [
+          "evidence:",
+          "verified",
+          "sync run",
+          "run id",
+          "run_id",
+          "command=",
+          "result=",
+          "query="
+        ]
+      },
+      "code": {},
+      "docs": {}
+    }
+  },
+  "project_policy_paths": [
+    ".ntm/closeout-audit.json",
+    ".beads/closeout-audit.json",
+    ".br-closeout-audit.json"
+  ],
+  "project_overrides": [
+    {
+      "name": "HR_dashboard",
+      "repo_path": "/home/ubuntu/ntm_Dev/HR_dashboard",
+      "mode_rules": {
+        "migration": {
+          "require_path_sets": [
+            {
+              "label": "schema",
+              "globs": [
+                "**/schema.prisma"
+              ]
+            },
+            {
+              "label": "migration",
+              "globs": [
+                "**/prisma/migrations/**"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

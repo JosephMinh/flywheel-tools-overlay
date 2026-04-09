@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Mail Wake Watcher
+After=agent-mail.service
+Wants=agent-mail.service
+
+[Service]
+Type=simple
+ExecStart=/home/ubuntu/tools/agent-mail-watcher/agent-mail-watcher watch
+WorkingDirectory=/home/ubuntu
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

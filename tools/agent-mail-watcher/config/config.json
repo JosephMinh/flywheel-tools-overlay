@@ -1,0 +1,79 @@
+{
+  "bindings_path": "/home/ubuntu/tools/agent-mail-watcher/config/bindings.json",
+  "auto_create_missing_panes": false,
+  "create_session_prefix": "agentmail",
+  "deferred_retry_seconds": 2.0,
+  "max_retry_attempts": 5,
+  "max_event_log_lines": 5000,
+  "lock_path": "/home/ubuntu/tools/agent-mail-watcher/state/scan.lock",
+  "log_path": "/home/ubuntu/tools/agent-mail-watcher/state/events.jsonl",
+  "mailbox_root": "/home/ubuntu/.mcp_agent_mail_git_mailbox_repo",
+  "poll_interval_seconds": 1.0,
+  "providers": {
+    "claude-code": {
+      "active_commands": [
+        "claude"
+      ],
+      "launch_template": "cd {project_key_quoted} && claude {prompt_quoted}",
+      "resume_template": "cd {project_key_quoted} && claude -r {session_id_quoted} {prompt_quoted}",
+      "session_lookup_provider": "claude-code",
+      "title_markers": [
+        "__cc_"
+      ]
+    },
+    "codex-cli": {
+      "active_commands": [
+        "bun",
+        "python3",
+        "codex"
+      ],
+      "launch_template": "cd {project_key_quoted} && codex --cd {project_key_quoted} {prompt_quoted}",
+      "resume_template": "cd {project_key_quoted} && codex resume {session_id_quoted} {prompt_quoted}",
+      "session_lookup_provider": "codex",
+      "title_markers": [
+        "__cod_"
+      ]
+    },
+    "gemini": {
+      "active_commands": [
+        "gemini",
+        "node"
+      ],
+      "launch_template": "cd {project_key_quoted} && gemini -i {prompt_quoted}",
+      "resume_template": "cd {project_key_quoted} && gemini --resume {session_id_quoted} -i {prompt_quoted}",
+      "session_lookup_provider": "gemini",
+      "title_markers": [
+        "__gmi_"
+      ]
+    },
+    "gemini-cli": {
+      "active_commands": [
+        "gemini",
+        "node"
+      ],
+      "launch_template": "cd {project_key_quoted} && gemini -i {prompt_quoted}",
+      "resume_template": "cd {project_key_quoted} && gemini --resume {session_id_quoted} -i {prompt_quoted}",
+      "session_lookup_provider": "gemini",
+      "title_markers": [
+        "__gmi_"
+      ]
+    },
+    "opencode": {
+      "active_commands": [
+        "opencode",
+        "bun",
+        "node"
+      ],
+      "launch_template": "cd {project_key_quoted} && opencode {project_key_quoted} --prompt {prompt_quoted}",
+      "resume_template": "cd {project_key_quoted} && opencode {project_key_quoted} --session {session_id_quoted} --prompt {prompt_quoted}",
+      "session_lookup_provider": "opencode",
+      "title_markers": [
+        "__opc_"
+      ]
+    }
+  },
+  "shell_command": "zsh -l",
+  "signals_dir": "/home/ubuntu/.mcp_agent_mail/signals",
+  "state_path": "/home/ubuntu/tools/agent-mail-watcher/state/state.json",
+  "wake_prompt_template": "Agent Mail wake-up for {agent_name} in {project_key}. New {importance} message from {sender}: {subject}. Fetch your inbox, acknowledge/respond if needed, and continue the next unblocked work you were waiting on."
+}
