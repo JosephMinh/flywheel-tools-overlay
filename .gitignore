@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+tools/agent-mail-watcher/config/bindings.json
+tools/agent-mail-watcher/config/bindings.json.backup-*
+tools/agent-mail-watcher/state/*
+!tools/agent-mail-watcher/state/.gitignore
+tools/agent-mail-watcher/backups/*
+!tools/agent-mail-watcher/backups/.gitignore

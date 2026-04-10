@@ -52,4 +52,5 @@ The installer is intentionally non-destructive:
 ## Notes
 
 - This repo currently includes the full tool trees as requested, including live state and logs.
+- Runtime-only watcher artifacts such as bindings, locks, event logs, and backups are intentionally gitignored so the repo stays clean while the tools run.
 - If you later want a cleaner split between durable source and runtime state, the next step is to move volatile state files behind `.gitignore` and preserve them only on the live machine.
