@@ -1,0 +1,14 @@
+{
+  "projects_base": "~/ntm_Dev",
+  "plan_file": "Plan.md",
+  "template": "turn_plan_into_beads",
+  "sync_branch": "beads-sync",
+  "spawn": {
+    "cc": 0,
+    "cod": 1,
+    "gmi": 0,
+    "no_user": false
+  },
+  "skip_vscode": false,
+  "skip_claude": false
+}
