@@ -1,12 +1,12 @@
 {
-  "bindings_path": "/home/ubuntu/tools/agent-mail-watcher/config/bindings.json",
+  "bindings_path": "/home/ubuntu/.config/agent-mail-watcher/bindings.json",
   "auto_create_missing_panes": false,
   "create_session_prefix": "agentmail",
   "deferred_retry_seconds": 2.0,
   "max_retry_attempts": 5,
   "max_event_log_lines": 5000,
-  "lock_path": "/home/ubuntu/tools/agent-mail-watcher/state/scan.lock",
-  "log_path": "/home/ubuntu/tools/agent-mail-watcher/state/events.jsonl",
+  "lock_path": "/home/ubuntu/.local/state/agent-mail-watcher/scan.lock",
+  "log_path": "/home/ubuntu/.local/state/agent-mail-watcher/events.jsonl",
   "mailbox_root": "/home/ubuntu/.mcp_agent_mail_git_mailbox_repo",
   "poll_interval_seconds": 1.0,
   "providers": {
@@ -74,6 +74,6 @@
   },
   "shell_command": "zsh -l",
   "signals_dir": "/home/ubuntu/.mcp_agent_mail/signals",
-  "state_path": "/home/ubuntu/tools/agent-mail-watcher/state/state.json",
+  "state_path": "/home/ubuntu/.local/state/agent-mail-watcher/state.json",
   "wake_prompt_template": "Agent Mail wake-up for {agent_name} in {project_key}. New {importance} message from {sender}: {subject}. Fetch your inbox, acknowledge/respond if needed, and continue the next unblocked work you were waiting on."
 }

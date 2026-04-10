@@ -3,23 +3,22 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source_tools="${repo_root}/tools"
-target_tools="${TARGET_TOOLS_DIR:-${HOME}/tools}"
 
-mkdir -p "${target_tools}"
 mkdir -p "${HOME}/.local/bin"
+mkdir -p "${HOME}/bin"
 mkdir -p "${HOME}/.config"
 mkdir -p "${HOME}/.local/state"
 mkdir -p "${HOME}/.config/systemd/user"
 
-rsync -a "${source_tools}/" "${target_tools}/"
-
-for tool_dir in "${target_tools}"/*; do
+for tool_dir in "${source_tools}"/*; do
   [ -d "${tool_dir}" ] || continue
   tool_name="$(basename "${tool_dir}")"
 
-  if [ -x "${tool_dir}/${tool_name}" ]; then
-    ln -sfn "${tool_dir}/${tool_name}" "${HOME}/.local/bin/${tool_name}"
-  fi
+  while IFS= read -r executable; do
+    exec_name="$(basename "${executable}")"
+    ln -sfn "${executable}" "${HOME}/.local/bin/${exec_name}"
+    ln -sfn "${executable}" "${HOME}/bin/${exec_name}"
+  done < <(find "${tool_dir}" -maxdepth 1 -mindepth 1 -type f -perm -u+x | sort)
 
   if [ -d "${tool_dir}/config" ]; then
     ln -sfn "${tool_dir}/config" "${HOME}/.config/${tool_name}"
@@ -38,4 +37,4 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 fi
 
-printf 'Synced tools into %s\n' "${target_tools}"
+printf 'Linked tool launchers, config, state, and services from %s\n' "${source_tools}"

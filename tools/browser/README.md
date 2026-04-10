@@ -6,12 +6,12 @@ and interact with any project's UI** via Playwright.
 ## How it works
 
 ```
-~/tools/browser/
+~/flywheel-tools-overlay/tools/browser/
   browser-server.ts                  ← Playwright HTTP server
-  browser.sh                         ← Universal CLI (symlinked to ~/bin/)
+  browser.sh                         ← Universal CLI (symlinked into ~/.local/bin and ~/bin)
   browser-allowlist.default.json     ← Global default allowlist
 
-~/bin/browser.sh → symlink           ← On PATH for all agents
+~/.local/bin/browser.sh → symlink    ← On PATH for all agents after install
 
 <any project>/
   .browser-allowlist.json            ← Optional per-project override

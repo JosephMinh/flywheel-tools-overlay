@@ -52,18 +52,44 @@
       "session_name": "Content_Engine",
       "updated_at": "2026-04-09T21:30:14.686532+00:00"
     },
-    "/home/ubuntu/ntm_Dev/HR_dashboard|CopperBison": {
-      "agent_name": "CopperBison",
-      "binding_nonce": "29c19fbed180af5d",
-      "pane_id": "%806",
-      "pane_key": "HR_dashboard:1:1",
-      "pane_pid": 3347621,
-      "program": "claude-code",
-      "project_key": "/home/ubuntu/ntm_Dev/HR_dashboard",
-      "sanitized_pane_key": "HR_dashboard-1-1",
+    "/home/ubuntu/ntm|CreamKite": {
+      "agent_name": "CreamKite",
+      "binding_nonce": "26b7543966650a16",
+      "pane_id": "%1266",
+      "pane_key": "ntm-lifecycle-multi-1775778246161257439:1:4",
+      "pane_pid": 3663244,
+      "program": "gemini-cli",
+      "project_key": "/home/ubuntu/ntm",
+      "sanitized_pane_key": "ntm-lifecycle-multi-1775778246161257439-1-4",
       "session_id": null,
-      "session_name": "HR_dashboard",
-      "updated_at": "2026-04-08T22:38:39.997122+00:00"
+      "session_name": "ntm-lifecycle-multi-1775778246161257439",
+      "updated_at": "2026-04-10T01:40:01.545566+00:00"
+    },
+    "/home/ubuntu/ntm|GreenBeaver": {
+      "agent_name": "GreenBeaver",
+      "binding_nonce": "1c7d29d56fd20b51",
+      "pane_id": "%1265",
+      "pane_key": "ntm-lifecycle-multi-1775778246161257439:1:3",
+      "pane_pid": 3663221,
+      "program": "codex-cli",
+      "project_key": "/home/ubuntu/ntm",
+      "sanitized_pane_key": "ntm-lifecycle-multi-1775778246161257439-1-3",
+      "session_id": null,
+      "session_name": "ntm-lifecycle-multi-1775778246161257439",
+      "updated_at": "2026-04-10T01:40:01.498765+00:00"
+    },
+    "/home/ubuntu/ntm|VioletEagle": {
+      "agent_name": "VioletEagle",
+      "binding_nonce": "228b83a90ab5ab9c",
+      "pane_id": "%1264",
+      "pane_key": "ntm-lifecycle-multi-1775778246161257439:1:2",
+      "pane_pid": 3663196,
+      "program": "claude-code",
+      "project_key": "/home/ubuntu/ntm",
+      "sanitized_pane_key": "ntm-lifecycle-multi-1775778246161257439-1-2",
+      "session_id": null,
+      "session_name": "ntm-lifecycle-multi-1775778246161257439",
+      "updated_at": "2026-04-10T01:40:01.451058+00:00"
     }
   },
   "version": 1

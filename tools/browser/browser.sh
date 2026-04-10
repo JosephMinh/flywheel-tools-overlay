@@ -225,7 +225,7 @@ INSPECTION
 SECURITY
   Domain allowlist resolution (first found wins):
     1. CWD/.browser-allowlist.json     (project override)
-    2. ~/tools/browser/browser-allowlist.default.json  (global default)
+    2. browser tool directory/browser-allowlist.default.json  (global default)
 
   All non-allowlisted network requests are blocked at the Playwright level.
   The evaluate/exec commands are disabled.

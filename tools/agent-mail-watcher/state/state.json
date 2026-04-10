@@ -177,57 +177,6 @@
       "queued_at": "2026-04-06T19:29:47.778229+00:00",
       "retry_exhausted_at": "2026-04-09T21:28:46.142795+00:00",
       "signature": "message:2550"
-    },
-    "/home/ubuntu/.mcp_agent_mail/signals/projects/home-ubuntu-ntm-dev-hr-dashboard/agents/ChartreuseCoyote.signal": {
-      "delivered": true,
-      "last_attempt_at": "2026-04-08T22:53:08.704483+00:00",
-      "processed_at": "2026-04-08T22:53:08.704493+00:00",
-      "signature": "message:2962"
-    },
-    "/home/ubuntu/.mcp_agent_mail/signals/projects/home-ubuntu-ntm-dev-hr-dashboard/agents/CopperBison.signal": {
-      "delivered": true,
-      "last_attempt_at": "2026-04-08T22:38:40.149092+00:00",
-      "processed_at": "2026-04-08T22:38:40.149101+00:00",
-      "signature": "message:2945"
-    },
-    "/home/ubuntu/.mcp_agent_mail/signals/projects/home-ubuntu-ntm-dev-hr-dashboard/agents/CoralFalcon.signal": {
-      "delivered": true,
-      "last_attempt_at": "2026-03-27T06:32:42.157693+00:00",
-      "processed_at": "2026-03-27T06:32:42.157701+00:00",
-      "signature": "message:1452"
-    },
-    "/home/ubuntu/.mcp_agent_mail/signals/projects/home-ubuntu-ntm-dev-hr-dashboard/agents/IcyFern.signal": {
-      "attempt_count": 6,
-      "deferred_reason": "unbound-native-provider-pane",
-      "delivered": false,
-      "last_attempt_at": "2026-04-09T21:28:46.194244+00:00",
-      "queued_at": "2026-04-02T16:52:12.261532+00:00",
-      "retry_exhausted_at": "2026-04-09T21:28:46.194244+00:00",
-      "signature": "message:2937"
-    },
-    "/home/ubuntu/.mcp_agent_mail/signals/projects/home-ubuntu-ntm-dev-hr-dashboard/agents/NavyGoose.signal": {
-      "attempt_count": 6,
-      "deferred_reason": "unbound-native-provider-pane",
-      "delivered": false,
-      "last_attempt_at": "2026-04-09T21:28:46.233625+00:00",
-      "queued_at": "2026-04-02T17:03:18.713429+00:00",
-      "retry_exhausted_at": "2026-04-09T21:28:46.233625+00:00",
-      "signature": "message:2937"
-    },
-    "/home/ubuntu/.mcp_agent_mail/signals/projects/home-ubuntu-ntm-dev-hr-dashboard/agents/PlumCitadel.signal": {
-      "delivered": true,
-      "last_attempt_at": "2026-04-08T22:53:20.202233+00:00",
-      "processed_at": "2026-04-08T22:53:20.202243+00:00",
-      "signature": "message:2962"
-    },
-    "/home/ubuntu/.mcp_agent_mail/signals/projects/home-ubuntu-ntm-dev-hr-dashboard/agents/SageMeadow.signal": {
-      "attempt_count": 6,
-      "deferred_reason": "unbound-native-provider-pane",
-      "delivered": false,
-      "last_attempt_at": "2026-04-09T21:28:47.374701+00:00",
-      "queued_at": "2026-04-08T06:23:40.638264+00:00",
-      "retry_exhausted_at": "2026-04-09T21:28:47.374701+00:00",
-      "signature": "message:2937"
     }
   }
 }

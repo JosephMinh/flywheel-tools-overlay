@@ -5,7 +5,7 @@ Wants=agent-mail.service
 
 [Service]
 Type=simple
-ExecStart=/home/ubuntu/tools/agent-mail-watcher/agent-mail-watcher watch
+ExecStart=/home/ubuntu/.local/bin/agent-mail-watcher watch
 WorkingDirectory=/home/ubuntu
 Restart=always
 RestartSec=2

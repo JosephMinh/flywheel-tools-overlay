@@ -11,8 +11,8 @@ evidence behind it, using:
 
 ## Install shape
 
-- Tool code: `/home/ubuntu/tools/br-closeout-audit/`
-- Launcher: `/home/ubuntu/bin/br-closeout-audit`
+- Tool code: `/home/ubuntu/flywheel-tools-overlay/tools/br-closeout-audit/`
+- Launcher: `/home/ubuntu/.local/bin/br-closeout-audit`
 
 ## Usage
 
@@ -43,9 +43,9 @@ br-closeout-audit --issue hr-j04f.1 --format json
 
 ## Project policy
 
-Global defaults live in:
+Global defaults live alongside the tool in:
 
-- `/home/ubuntu/tools/br-closeout-audit/config.json`
+- `/home/ubuntu/flywheel-tools-overlay/tools/br-closeout-audit/config.json`
 
 Optional repo-local overrides are loaded automatically when present:
 

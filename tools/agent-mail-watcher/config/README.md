@@ -66,12 +66,12 @@ This watcher is the user-level wakeup bridge for Agent Mail. It must work withou
 
 ## Files That Matter
 
-- Watcher home: `/home/ubuntu/tools/agent-mail-watcher`
-- Watcher script: `/home/ubuntu/tools/agent-mail-watcher/agent-mail-watcher`
-- Watcher config: `/home/ubuntu/tools/agent-mail-watcher/config/config.json`
-- Watcher bindings: `/home/ubuntu/tools/agent-mail-watcher/config/bindings.json`
-- Watcher events: `/home/ubuntu/tools/agent-mail-watcher/state/events.jsonl`
-- Watcher state: `/home/ubuntu/tools/agent-mail-watcher/state/state.json`
+- Watcher home: `/home/ubuntu/flywheel-tools-overlay/tools/agent-mail-watcher`
+- Watcher launcher: `/home/ubuntu/.local/bin/agent-mail-watcher`
+- Watcher config symlink: `/home/ubuntu/.config/agent-mail-watcher`
+- Watcher bindings symlink: `/home/ubuntu/.config/agent-mail-watcher/bindings.json`
+- Watcher events symlink: `/home/ubuntu/.local/state/agent-mail-watcher/events.jsonl`
+- Watcher state symlink: `/home/ubuntu/.local/state/agent-mail-watcher/state.json`
 - Compatibility symlink: `/home/ubuntu/.local/bin/agent-mail-watcher`
 - Compatibility symlink: `/home/ubuntu/.config/agent-mail-watcher`
 - NTM session roots:
@@ -80,7 +80,7 @@ This watcher is the user-level wakeup bridge for Agent Mail. It must work withou
 
 ## Fast Validation
 
-1. Run `/home/ubuntu/tools/agent-mail-watcher/agent-mail-watcher status` and confirm the target agent is `alive`, bound, and `wake_deliverable: true` when idle.
+1. Run `/home/ubuntu/.local/bin/agent-mail-watcher status` and confirm the target agent is `alive`, bound, and `wake_deliverable: true` when idle.
 2. Send a real Agent Mail message to that agent.
 3. Check `events.jsonl` for `prompted-live-pane` or `suppressed-working-pane`.
 4. If needed, inspect the pane with `tmux capture-pane -p -t <pane-id>`.
