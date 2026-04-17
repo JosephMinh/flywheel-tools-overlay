@@ -66,11 +66,15 @@ permanent fallback.
 1. Enforce a machine-readable bead contract for new work.
 2. Block close attempts that do not satisfy hard completion constraints.
 3. Require evidence that maps to declared acceptance criteria.
-4. Minimize agent discretion and parser guesswork.
-5. Preserve post-hoc auditing for historical review and bypass detection.
-6. Provide a reliable Rust implementation with explicit packaging and install
+4. Apply stricter hard constraints only where the explicit bead contract says
+   they are needed.
+5. Preserve lightweight closure for low-risk beads by separating blocking rules
+   from advisory prompts.
+6. Minimize agent discretion and parser guesswork.
+7. Preserve post-hoc auditing for historical review and bypass detection.
+8. Provide a reliable Rust implementation with explicit packaging and install
    behavior.
-7. Remove v1 Python production code after cutover.
+9. Remove v1 Python production code after cutover.
 
 ## 6. Non-Goals
 
@@ -117,6 +121,7 @@ Example:
 closeout_contract:
   schema_version: 1
   mode: migration
+  assurance_level: strict
   scope_paths:
     - db/schema.sql
     - db/migrations/**
@@ -134,21 +139,66 @@ closeout_contract:
     - id: EV-2
       kind: command
       command_hint: bun test db
+  advisory_checks:
+    - Confirm rollback notes are documented if the migration needs operator care.
 ```
 
 Required contract fields:
 
 1. `schema_version`
 2. `mode`
-3. `scope_paths`
-4. `acceptance_criteria`
-5. `evidence_plan`
+3. `assurance_level`
+4. `scope_paths`
+5. `acceptance_criteria`
+6. `evidence_plan`
+
+Rules for contract fields:
+
+1. `assurance_level` must be one of `minimal`, `standard`, or `strict`.
+2. `scope_paths` is required for `standard` and `strict` beads.
+3. `scope_paths` may be empty for `minimal` beads when the work is intentionally
+   broad and the bead relies on advisory prompts instead of path-specific hard
+   constraints.
+4. `acceptance_criteria` and `evidence_plan` are required for `standard` and
+   `strict` beads.
+5. `advisory_checks` is optional and non-blocking. It is recommended for
+   `minimal` beads, especially cleanup and broad maintenance work.
 
 Required acceptance criteria shape:
 
 1. Each criterion must have a stable ID such as `AC-1`.
 2. IDs must be unique within the bead.
 3. Criteria must be concrete enough to map to evidence.
+
+Example: minimal cleanup bead
+
+```yaml
+closeout_contract:
+  schema_version: 1
+  mode: cleanup
+  assurance_level: minimal
+  scope_paths: []
+  acceptance_criteria: []
+  evidence_plan: []
+  advisory_checks:
+    - Confirm obviously dead files and stale references were removed.
+    - Confirm the repo is still coherent after cleanup.
+```
+
+Example: minimal docs bead with one hard path constraint
+
+```yaml
+closeout_contract:
+  schema_version: 1
+  mode: docs
+  assurance_level: minimal
+  scope_paths:
+    - README.md
+  acceptance_criteria: []
+  evidence_plan: []
+  advisory_checks:
+    - Confirm the README reflects the current operator workflow.
+```
 
 ## 9. Hard Invariants
 
@@ -159,12 +209,10 @@ details, but it must not be able to disable these invariants.
 
 1. A valid bead contract must be present for new beads.
 2. `mode` must resolve to a canonical supported mode.
-3. All blocker dependencies must already be closed.
-4. Non-meta implementation evidence must exist.
-5. All declared acceptance criteria must be covered by close evidence.
-6. Mode-specific evidence requirements must be satisfied.
-7. Structured close evidence must parse successfully.
-8. Operational uncertainty blocks closure.
+3. `assurance_level` must resolve to a canonical supported level.
+4. All blocker dependencies must already be closed.
+5. Non-meta implementation evidence must exist.
+6. Operational uncertainty blocks closure.
 
 Examples of operational uncertainty:
 
@@ -174,7 +222,62 @@ Examples of operational uncertainty:
 4. policy loading or schema validation fails.
 5. override journaling fails.
 
-## 9.2 Repo-Tunable Inputs
+## 9.2 Assurance-Dependent Hard Rules
+
+The tool should determine the effective hard constraints in a fixed order:
+
+1. universal invariants
+2. assurance profile
+3. mode-specific overlays
+4. repo-local tuning
+
+Universal invariants are always enforced. Additional hard constraints come from
+the explicit `assurance_level`.
+
+### `minimal`
+
+Use for low-risk beads like repo cleanup, README edits, or housekeeping work.
+
+Blocking behavior:
+
+1. Enforce only the universal invariants by default.
+2. If `scope_paths` are present, require at least one declared path or glob to
+   be touched by non-meta evidence.
+3. Do not require acceptance-criteria coverage by default.
+4. Do not require structured close evidence by default.
+
+Non-blocking behavior:
+
+1. Show `advisory_checks` prominently during `lint-bead`, `preclose`, and
+   `safe-close`.
+2. Advisory checks never block close on their own.
+
+### `standard`
+
+Use for ordinary code, docs, and test work that should prove completion more
+clearly.
+
+Blocking behavior:
+
+1. Require non-empty `scope_paths`.
+2. Require `acceptance_criteria`.
+3. Require `evidence_plan`.
+4. Require all acceptance criteria to be covered by close evidence.
+5. Require declared paths or globs to be touched.
+
+### `strict`
+
+Use for high-risk work like security, database, migration, or other sensitive
+verification-heavy changes.
+
+Blocking behavior:
+
+1. Apply all `standard` requirements.
+2. Require structured close evidence.
+3. Require all mode-specific overlays for the effective mode.
+4. Allow stricter override policy than lower assurance levels.
+
+## 9.3 Repo-Tunable Inputs
 
 Repo policy may tune inputs like:
 
@@ -182,7 +285,8 @@ Repo policy may tune inputs like:
 2. Mode aliases for legacy migration
 3. Repo-specific required path sets
 4. Repo-specific command or evidence token variants
-5. Output verbosity
+5. Recommended default assurance levels for low-risk modes
+6. Output verbosity
 
 Repo policy must not be able to turn off the hard invariants in `9.1`.
 
@@ -203,6 +307,54 @@ Canonical modes for v2:
 3. `migration`
 4. `test`
 5. `docs`
+6. `cleanup`
+7. `security`
+
+## 10.1 Assurance Level Classification
+
+Assurance level classification must be explicit and deterministic.
+
+1. `closeout_contract.assurance_level` is authoritative for new beads.
+2. Repo policy may define a default assurance level per mode.
+3. Repo policy may define a minimum assurance level per mode.
+4. If the contract picks an assurance level below the mode minimum, the bead is
+   blocked or upgraded according to policy. Silent downgrade is not allowed.
+
+Default intent for canonical modes:
+
+1. `cleanup` defaults to `minimal`
+2. `docs` defaults to `minimal`
+3. `code` defaults to `standard`
+4. `test` defaults to `standard`
+5. `verification` defaults to `strict`
+6. `migration` defaults to `strict`
+7. `security` defaults to `strict`
+
+## 10.2 Constraint Resolution
+
+The tool should determine close constraints without interpreting vague prose.
+
+Resolution order:
+
+1. validate the contract
+2. resolve canonical `mode`
+3. resolve canonical `assurance_level`
+4. apply universal invariants
+5. apply the assurance profile
+6. apply mode-specific hard overlays
+7. print advisory checks
+
+Examples:
+
+1. `docs + minimal + scope_paths=[README.md]`
+   Closure is blocked unless `README.md` is actually touched.
+2. `cleanup + minimal + scope_paths=[]`
+   Closure uses universal hard constraints plus non-blocking advisory prompts.
+3. `migration + strict`
+   Closure requires standard hard constraints, structured close evidence, and
+   migration-specific file evidence.
+4. `security + strict`
+   Closure requires strict evidence and any security-specific overlays.
 
 ## 11. Compatibility Strategy
 
@@ -218,6 +370,14 @@ explicit.
    Must be clearly marked as legacy-derived in text and JSON output.
 4. Compatibility window:
    Exists only to migrate existing work; it is not a permanent design state.
+
+Legacy derivation requirements:
+
+1. Derive both `mode` and `assurance_level`.
+2. Use repo policy defaults when the legacy bead text does not justify stricter
+   classification.
+3. Allow repo policy to assign strict minimum assurance to sensitive legacy
+   modes like `migration` and `security`.
 
 Compatibility requirements:
 
@@ -361,7 +521,8 @@ Stage rules:
 Token presence alone is too weak for hard gating. v2 should parse named fields,
 not just search for loose substrings.
 
-Minimum close evidence for modes `verification`, `test`, and `migration`:
+Minimum close evidence when the effective rule set requires structured close
+evidence:
 
 1. `AC:` line listing the covered acceptance criteria IDs
 2. `Command:` line
@@ -380,10 +541,12 @@ Run-Id: local-2026-04-12T07:10:00Z
 
 Rules:
 
-1. Every declared acceptance criterion must be listed in `AC:` coverage unless
-   policy explicitly allows partial close for that mode.
-2. The parser must validate field names and values, not just token existence.
-3. Empty, malformed, or duplicate fields are blockers.
+1. `strict` beads require complete acceptance coverage.
+2. `standard` beads require complete acceptance coverage unless policy
+   explicitly allows a narrower mode-specific rule.
+3. `minimal` beads do not require acceptance coverage by default.
+4. The parser must validate field names and values, not just token existence.
+5. Empty, malformed, or duplicate fields are blockers.
 
 ## 15. Policy Model (v2)
 
@@ -425,10 +588,41 @@ Rules:
   "policy_name": "default-v2",
   "hard_invariants": {
     "require_contract": true,
+    "require_canonical_mode": true,
+    "require_canonical_assurance_level": true,
     "require_closed_blockers": true,
     "require_non_meta_evidence": true,
-    "require_acceptance_coverage": true,
     "fail_closed_on_operational_error": true
+  },
+  "assurance_profiles": {
+    "minimal": {
+      "require_scope_paths": false,
+      "require_path_evidence_if_scope_paths_present": true,
+      "require_acceptance_criteria": false,
+      "require_acceptance_coverage": false,
+      "require_evidence_plan": false,
+      "require_structured_close_evidence": false,
+      "advisory_checks_block_close": false
+    },
+    "standard": {
+      "require_scope_paths": true,
+      "require_path_evidence_if_scope_paths_present": true,
+      "require_acceptance_criteria": true,
+      "require_acceptance_coverage": true,
+      "require_evidence_plan": true,
+      "require_structured_close_evidence": false,
+      "advisory_checks_block_close": false
+    },
+    "strict": {
+      "require_scope_paths": true,
+      "require_path_evidence_if_scope_paths_present": true,
+      "require_acceptance_criteria": true,
+      "require_acceptance_coverage": true,
+      "require_evidence_plan": true,
+      "require_structured_close_evidence": true,
+      "advisory_checks_block_close": false,
+      "override_policy": "restricted"
+    }
   },
   "legacy_compat": {
     "allow_derived_contract_for_existing_beads": true,
@@ -442,23 +636,46 @@ Rules:
       "verification": ["verification", "verify"],
       "migration": ["database", "db", "migration", "schema"],
       "test": ["testing", "test", "tests"],
-      "docs": ["docs", "documentation"]
+      "docs": ["docs", "documentation"],
+      "cleanup": ["cleanup", "chore", "housekeeping"],
+      "security": ["security", "auth", "permissions", "compliance"]
     },
     "mode_rules": {
+      "cleanup": {
+        "default_assurance_level": "minimal",
+        "minimum_assurance_level": "minimal"
+      },
+      "docs": {
+        "default_assurance_level": "minimal",
+        "minimum_assurance_level": "minimal"
+      },
+      "code": {
+        "default_assurance_level": "standard",
+        "minimum_assurance_level": "standard"
+      },
+      "test": {
+        "default_assurance_level": "standard",
+        "minimum_assurance_level": "standard",
+        "require_any_globs": ["**/tests/**", "**/*.test.ts", "**/*.spec.ts"]
+      },
+      "verification": {
+        "default_assurance_level": "strict",
+        "minimum_assurance_level": "strict",
+        "require_structured_close_evidence": true
+      },
       "migration": {
+        "default_assurance_level": "strict",
+        "minimum_assurance_level": "strict",
         "require_path_sets": [
           {"label": "schema", "globs": ["**/schema.prisma", "**/schema.sql"]},
           {"label": "migration", "globs": ["**/migrations/**"]}
         ]
       },
-      "verification": {
+      "security": {
+        "default_assurance_level": "strict",
+        "minimum_assurance_level": "strict",
         "require_structured_close_evidence": true
-      },
-      "test": {
-        "require_structured_close_evidence": true,
-        "require_any_globs": ["**/tests/**", "**/*.test.ts", "**/*.spec.ts"]
-      },
-      "docs": {}
+      }
     }
   },
   "outputs": {
@@ -491,6 +708,8 @@ Top-level JSON fields:
 5. `policy`
 6. `command`
 7. `timestamp`
+8. `effective_mode`
+9. `effective_assurance_level`
 
 Each finding should include:
 
@@ -501,6 +720,7 @@ Each finding should include:
 5. `remediation`
 6. `source_stage`
 7. `legacy_derived`
+8. `advisory_only`
 
 ## 17. Override Model
 
@@ -515,6 +735,8 @@ use.
 4. Override attempts are rejected when contract parsing fails.
 5. Override attempts must print a visible warning banner in text and JSON
    output.
+6. Strict modes such as `migration` and `security` may use tighter override
+   rules than `minimal` and `standard` modes.
 
 ## 17.2 Override Journal
 
@@ -593,7 +815,8 @@ The rollout should optimize for hard constraints first, not for a mechanical
 
 1. Freeze the bead contract schema.
 2. Freeze the list of non-configurable invariants.
-3. Freeze the JSON output contract and compatibility expectations.
+3. Freeze the assurance profiles and mode minimums.
+4. Freeze the JSON output contract and compatibility expectations.
 
 ## Phase 1: Rust core and compatibility baseline
 
@@ -606,7 +829,8 @@ The rollout should optimize for hard constraints first, not for a mechanical
 
 1. Ship `lint-bead`.
 2. Require machine-readable contract for new beads.
-3. Keep legacy derivation only for existing beads.
+3. Require explicit `assurance_level` for new beads.
+4. Keep legacy derivation only for existing beads.
 
 ## Phase 3: Deterministic pre-close enforcement
 
@@ -622,6 +846,7 @@ The rollout should optimize for hard constraints first, not for a mechanical
 2. Integrate with upstream hooks if available.
 3. Use `audit` to flag direct `br close` bypasses until hook support exists.
 4. Tune repo-local policy only where genuinely needed.
+5. Confirm low-risk minimal beads are not over-blocked in real workflows.
 
 ## Phase 5: Remove v1 code
 
@@ -652,10 +877,12 @@ Initial target:
 1. contract parsing and validation
 2. policy merge and schema validation
 3. mode resolution
-4. structured close evidence parsing
-5. acceptance-criteria coverage checks
-6. override validation
-7. failure-on-uncertainty behavior
+4. assurance-level resolution
+5. structured close evidence parsing
+6. acceptance-criteria coverage checks
+7. override validation
+8. failure-on-uncertainty behavior
+9. advisory-check rendering without false blockers
 
 ## 22.2 Integration Tests
 
@@ -666,10 +893,12 @@ Use fixture repos with scripted histories for:
 3. missing dependency closeout
 4. migration missing schema or migration path set
 5. verification missing structured evidence
-6. malformed contract
-7. direct `br close` bypass later detected by `audit`
-8. override journaling failure
-9. `br close` failure after successful `preclose`
+6. minimal cleanup bead with advisory-only prompts
+7. minimal docs bead requiring `README.md` touch
+8. malformed contract
+9. direct `br close` bypass later detected by `audit`
+10. override journaling failure
+11. `br close` failure after successful `preclose`
 
 ## 22.3 Compatibility Tests
 
@@ -690,25 +919,27 @@ Use fixture repos with scripted histories for:
 | ID | Stage | Scenario | Expected Result |
 |---|---|---|---|
 | AT-01 | lint/create | New bead missing contract block | BLOCKER `missing_contract` |
-| AT-02 | lint/create | Contract missing `mode` | BLOCKER `missing_required_field` |
+| AT-02 | lint/create | Contract missing `mode` or `assurance_level` | BLOCKER `missing_required_field` |
 | AT-03 | lint/create | Contract has duplicate AC IDs | BLOCKER `duplicate_acceptance_criterion_id` |
-| AT-04 | lint/update | Valid contract for code bead | PASS |
-| AT-05 | preclose | Open blocker dependencies exist | BLOCKER `open_blocker_dependencies` |
-| AT-06 | preclose | Staged diff touches only meta paths | BLOCKER `staged_meta_only_close` |
-| AT-07 | preclose | Verification reason lacks structured fields | BLOCKER `invalid_structured_close_evidence` |
-| AT-08 | preclose | Acceptance criteria not fully covered | BLOCKER `acceptance_criteria_uncovered` |
-| AT-09 | preclose | Migration bead missing migration path set | BLOCKER `missing_required_path_set_migration` |
-| AT-10 | safe-close | Preclose blockers present | no `br close` call executed |
-| AT-11 | safe-close | No blockers | `br close` executed successfully |
-| AT-12 | safe-close | Override without valid reason | BLOCKER `force_override_without_reason` |
-| AT-13 | safe-close | Override journal write fails | exit `2`, close blocked |
-| AT-14 | safe-close | `br close` fails after pass | exit `2`, failure surfaced |
-| AT-15 | audit | Closed bead with meta-only evidence | BLOCKER `meta_only_commits` |
-| AT-16 | audit | Legacy bead without contract | result marked `legacy_derived=true` |
-| AT-17 | policy-check | Invalid schema version | exit `2` with schema error |
-| AT-18 | compatibility | Bare invocation runs audit | PASS |
-| AT-19 | compatibility | v1 config adapts with warning | PASS with compatibility warning |
-| AT-20 | performance | Single-issue preclose latency | under target threshold |
+| AT-04 | lint/update | Valid `cleanup + minimal` contract with advisory checks | PASS with advisory prompts |
+| AT-05 | lint/update | `security` bead marked `minimal` below mode minimum | BLOCKER `assurance_level_below_mode_minimum` |
+| AT-06 | preclose | Open blocker dependencies exist | BLOCKER `open_blocker_dependencies` |
+| AT-07 | preclose | `docs + minimal` bead names `README.md` but does not touch it | BLOCKER `declared_scope_not_touched` |
+| AT-08 | preclose | `cleanup + minimal` bead has no scope paths but has non-meta cleanup evidence | PASS with advisory prompts |
+| AT-09 | preclose | Verification or security reason lacks structured fields | BLOCKER `invalid_structured_close_evidence` |
+| AT-10 | preclose | Standard or strict bead leaves acceptance criteria uncovered | BLOCKER `acceptance_criteria_uncovered` |
+| AT-11 | preclose | Migration bead missing migration path set | BLOCKER `missing_required_path_set_migration` |
+| AT-12 | safe-close | Preclose blockers present | no `br close` call executed |
+| AT-13 | safe-close | No blockers | `br close` executed successfully |
+| AT-14 | safe-close | Override without valid reason | BLOCKER `force_override_without_reason` |
+| AT-15 | safe-close | Override journal write fails | exit `2`, close blocked |
+| AT-16 | safe-close | `br close` fails after pass | exit `2`, failure surfaced |
+| AT-17 | audit | Closed bead with meta-only evidence | BLOCKER `meta_only_commits` |
+| AT-18 | audit | Legacy bead without contract | result marked `legacy_derived=true` |
+| AT-19 | policy-check | Invalid schema version | exit `2` with schema error |
+| AT-20 | compatibility | Bare invocation runs audit | PASS |
+| AT-21 | compatibility | v1 config adapts with warning | PASS with compatibility warning |
+| AT-22 | performance | Single-issue preclose latency | under target threshold |
 
 ## 24. V1 Decommissioning Instructions
 
@@ -740,25 +971,32 @@ v2 is complete when all are true:
    and `policy-check`.
 2. New beads require a machine-readable contract.
 3. Hard invariants are enforced before close.
-4. Acceptance criteria coverage is validated during close.
-5. Compatibility behavior for legacy beads and bare audit invocation exists in
+4. Assurance profiles determine how much additional hard gating each bead gets.
+5. Advisory checks are displayed without turning low-risk work into false
+   blockers.
+6. Acceptance criteria coverage is validated when required by the effective
+   assurance profile.
+7. Compatibility behavior for legacy beads and bare audit invocation exists in
    Rust.
-6. Packaging and install behavior are documented and tested.
-7. Acceptance tests pass in CI.
-8. At least one real repo uses `safe-close` as the standard close path.
-9. The Python v1 production implementation has been removed.
+8. Packaging and install behavior are documented and tested.
+9. Acceptance tests pass in CI.
+10. At least one real repo uses `safe-close` as the standard close path.
+11. The Python v1 production implementation has been removed.
 
 ## 26. Immediate Next Build Steps
 
 1. Freeze the bead contract schema and one canonical example.
 2. Freeze the list of hard invariants that cannot be disabled by policy.
-3. Decide the Rust packaging layout so `install.sh` still exposes
+3. Freeze the assurance-level matrix and mode minimums.
+4. Decide the Rust packaging layout so `install.sh` still exposes
    `br-closeout-audit`.
-4. Scaffold the Rust crate and adapter interfaces.
-5. Implement policy parsing, schema validation, and legacy config adaptation.
-6. Implement `lint-bead` before building more heuristic audit logic.
-7. Implement `preclose` and `safe-close` with fail-closed behavior.
-8. Port audit functionality into Rust with compatible default invocation.
-9. Add fixture-driven tests for contract parsing, close evidence, override
+5. Scaffold the Rust crate and adapter interfaces.
+6. Implement policy parsing, schema validation, assurance resolution, and
+   legacy config adaptation.
+7. Implement `lint-bead` before building more heuristic audit logic.
+8. Implement `preclose` and `safe-close` with fail-closed behavior.
+9. Port audit functionality into Rust with compatible default invocation.
+10. Add fixture-driven tests for contract parsing, assurance profiles, close
+   evidence, override
    journaling, and `br close` failure handling.
-10. Remove v1 Python runtime code after rollout criteria are met.
+11. Remove v1 Python runtime code after rollout criteria are met.
