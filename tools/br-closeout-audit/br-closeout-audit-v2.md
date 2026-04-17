@@ -2,73 +2,94 @@
 
 ## 1. Purpose
 
-`br-closeout-audit` v2 is a full rebuild of the closeout auditor as a Rust
-enforcement tool.
+`br-closeout-audit` v2 is a full Rust rebuild of the close-control system for
+beads.
 
 The product goal is simple:
 
-1. A bead is closeable only when its declared work contract and observed
-   completion evidence agree.
+1. a bead is closeable only when its declared work contract and observed
+   completion evidence agree
+2. agents should not be left to improvise what "done" means for high-risk work
+3. low-risk work should still have lightweight, explicit close expectations
 
-The design should make closure deterministic enough that agents are not left to
-interpret "done" for themselves, while still allowing low-risk work to stay
-lightweight.
+## 2. Rebuild Declaration
 
-This rebuild should not be framed as "the current auditor, but bigger." It
-should be framed as a new close-control system under the same operator-facing
-name.
+This document is for a rebuild, not an upgrade.
 
-## 2. Product Thesis
+Rules for the rebuild:
+
+1. do not preserve the existing Python tool's architecture, config shape,
+   parser shape, or heuristic model just because they already exist
+2. do not treat the current tool as the conceptual baseline
+3. the existing tool may be mined for useful ideas, examples, or migration
+   cases, but it must not constrain the new design
+4. the Rust implementation should be designed from the close-control problem
+   outward
+5. the rebuild must end with the existing tool removed from the repo
+
+This should be framed as a new close-control system under the same
+operator-facing command name.
+
+## 3. Product Thesis
 
 The core idea is:
 
-1. Every bead resolves to one canonical internal contract.
-2. Every contract compiles into explicit obligations.
-3. The evaluator decides close readiness by checking whether those obligations
-   are satisfied.
+1. every bead resolves to one canonical internal contract
+2. every contract compiles into explicit obligations
+3. the evaluator decides close readiness by checking those obligations
+4. the close path records explicit outcomes, receipts, and attestations
 
 This is more robust than a design centered on parsing free-form text and
 sprinkling rule-specific heuristics across the codebase.
 
-## 3. Design Principles
+## 4. Design Principles
 
-1. Canonical model first, storage format second.
-2. Deterministic obligations before heuristic interpretation.
-3. Simple evaluation pipeline over stateful workflow machinery.
-4. Fail closed on uncertainty.
-5. Low-risk work should stay lightweight.
-6. High-risk work should require stronger proof.
-7. Explanations and remediation should be first-class outputs.
-8. The rebuild should remove v1 code rather than carry it indefinitely.
+1. canonical model first, storage format second
+2. deterministic obligations before heuristic interpretation
+3. simple evaluation pipeline over stateful workflow machinery
+4. fail closed on uncertainty
+5. low-risk work should stay lightweight
+6. high-risk work should require stronger proof
+7. explanations and remediation should be first-class outputs
+8. packaging and install behavior must be explicit, not inferred later
+9. the rebuild should remove v1 code rather than carry it indefinitely
 
-## 4. Non-Goals
+## 5. Non-Goals
 
-1. Replacing `br` as the issue tracker.
-2. Running arbitrary build or test commands automatically by default.
-3. Making every enforcement rule repo-configurable.
-4. Building a complicated persistent workflow engine around close decisions.
-5. Keeping the Python implementation as a runtime fallback.
+1. replacing `br` as the issue tracker
+2. running arbitrary build or test commands automatically by default
+3. making every enforcement rule repo-configurable
+4. building a complicated persistent workflow engine around close decisions
+5. keeping the Python implementation as a runtime fallback
+6. preserving the existing CLI, config, or heuristics unless they are
+   deliberately re-adopted in the rebuild spec
 
-## 5. Architecture Overview
+## 6. Architecture Overview
 
 The evaluator should be built as a small pipeline:
 
-1. Load raw issue, policy, and repo state through adapters.
-2. Normalize raw inputs into canonical internal models.
-3. Compile the contract into explicit obligations.
-4. Collect only the evidence needed to evaluate those obligations.
-5. Produce a decision with blockers, attestations, advisories, and remediation.
-6. Optionally call `br close` if the decision allows it.
+1. load raw issue, policy, and repo state through adapters
+2. normalize raw inputs into canonical internal models
+3. resolve policy defaults and mode packs
+4. compile the resolved contract into explicit obligations
+5. collect only the evidence needed to evaluate those obligations
+6. produce a decision with blockers, attestations, advisories, and remediation
+7. optionally call `br close` if the decision allows it
 
 Conceptually:
 
 ```text
-Raw Inputs -> Canonical Models -> Obligations -> Observed Evidence -> Decision
+Raw Inputs
+  -> Authored Contract
+  -> Resolved Contract
+  -> Compiled Plan
+  -> Observed Evidence
+  -> Decision
 ```
 
 This should be the mental model for the entire rebuild.
 
-## 6. Canonical Internal Model
+## 7. Canonical Internal Model
 
 The rebuild should define one internal representation for the system, regardless
 of where the data came from.
@@ -76,15 +97,36 @@ of where the data came from.
 Suggested core models:
 
 ```rust
-struct BeadContract {
+struct AuthoredContract {
     issue_id: String,
     title: String,
-    mode: Mode,
-    assurance_level: AssuranceLevel,
+    source: ContractSource,
+    schema_version: u32,
+    mode: Option<Mode>,
+    assurance_level: Option<AssuranceLevel>,
     scope_paths: Vec<PathSpec>,
     acceptance_criteria: Vec<AcceptanceCriterion>,
-    evidence_plan: Vec<EvidenceRequirement>,
+    evidence_plan: Vec<AuthoredRequirement>,
     advisory_checks: Vec<String>,
+}
+
+struct ResolvedContract {
+    issue_id: String,
+    title: String,
+    source: ContractSource,
+    effective_mode: Mode,
+    effective_assurance_level: AssuranceLevel,
+    scope_paths: Vec<PathSpec>,
+    acceptance_criteria: Vec<AcceptanceCriterion>,
+    evidence_plan: Vec<ResolvedRequirement>,
+    advisory_checks: Vec<String>,
+    policy_name: String,
+}
+
+struct CompiledPlan {
+    blocker_obligations: Vec<CompiledObligation>,
+    attestation_obligations: Vec<CompiledObligation>,
+    advisory_checks: Vec<AdvisoryCheck>,
 }
 
 struct AcceptanceCriterion {
@@ -92,44 +134,42 @@ struct AcceptanceCriterion {
     text: String,
 }
 
-enum EvidenceRequirement {
-    TouchAny { label: Option<String>, paths: Vec<PathSpec>, covers: Vec<String> },
-    TouchAll { label: Option<String>, paths: Vec<PathSpec>, covers: Vec<String> },
-    PathSet { label: String, paths: Vec<PathSpec>, covers: Vec<String> },
-    CommandReceipt { label: Option<String>, covers: Vec<String>, command_hint: Option<String> },
-    DependencyClosed { dependency_ids: Vec<String>, covers: Vec<String> },
-    ArtifactExists { paths: Vec<PathSpec>, covers: Vec<String> },
-    ManualAttestation { id: String, text: String, covers: Vec<String> },
+enum ContractSource {
+    DescriptionYaml,
+    LegacyDerived,
+    FutureStructuredFields,
 }
 
-struct ResolvedPolicy {
-    policy_name: String,
-    hard_invariants: HardInvariants,
-    assurance_profiles: AssuranceProfiles,
-    mode_packs: ModePacks,
-    outputs: OutputPolicy,
+enum DecisionOutcome {
+    Allowed,
+    Blocked,
+    AttestationRequired,
+    Error,
 }
 
 struct ObservedEvidence {
     touched_paths: Vec<String>,
     dependency_states: Vec<DependencyState>,
-    close_reason_fields: CloseReasonFields,
     receipts: Vec<EvidenceReceipt>,
+    close_reason_fields: CloseReasonFields,
+    attestations: Vec<AttestationRecord>,
 }
 
 struct Decision {
-    allow_close: bool,
+    outcome: DecisionOutcome,
     blockers: Vec<Finding>,
     required_attestations: Vec<Finding>,
     advisories: Vec<Finding>,
-    obligations_evaluated: Vec<ObligationResult>,
+    obligation_results: Vec<ObligationResult>,
+    remediation: Vec<String>,
+    operational_error: Option<OperationalError>,
 }
 ```
 
 The important part is not the exact syntax. The important part is that the rule
 engine never operates on raw Markdown, raw labels, or arbitrary YAML strings.
 
-## 7. Adapters and Storage
+## 8. Adapters and Storage
 
 The canonical model should be independent from storage.
 
@@ -138,7 +178,8 @@ Adapter types:
 1. `DescriptionYamlAdapter`
    Reads a fenced YAML block from the issue description.
 2. `LegacyDerivationAdapter`
-   Derives a provisional contract for old beads that do not yet have one.
+   Derives a provisional authored contract for old beads that do not yet have
+   one.
 3. `FutureStructuredFieldsAdapter`
    Reserved for a future where `br` supports first-class structured issue
    fields.
@@ -147,13 +188,13 @@ Adapter responsibilities:
 
 1. parse raw input
 2. validate adapter-specific syntax
-3. normalize into `BeadContract`
+3. normalize into `AuthoredContract`
 4. mark whether the contract was authored or derived
 
-The enforcement engine must consume only the canonical `BeadContract`, not the
-raw adapter outputs.
+The enforcement engine must consume only canonical models, not raw adapter
+outputs.
 
-## 8. Bead Contract
+## 9. Bead Contract
 
 Until upstream tooling provides first-class fields, the contract can live in
 the issue description as a fenced YAML block. That is a storage adapter, not
@@ -203,10 +244,10 @@ Required contract fields:
 
 Rules:
 
-1. `assurance_level` must be one of `minimal`, `standard`, or `strict`.
-2. `acceptance_criteria` IDs must be unique.
-3. `evidence_plan` must be typed and valid against schema.
-4. `advisory_checks` is optional and never blocks close by itself.
+1. `assurance_level` must be one of `minimal`, `standard`, or `strict`
+2. `acceptance_criteria` IDs must be unique
+3. `evidence_plan` must be typed and valid against schema
+4. `advisory_checks` is optional and never blocks close by itself
 
 Example: lightweight docs bead
 
@@ -243,12 +284,14 @@ closeout_contract:
     - Confirm the repo still feels coherent after cleanup.
 ```
 
-## 9. Evidence Plan Is Executable
+## 10. Evidence Plan Is Executable
 
 `evidence_plan` should not be descriptive metadata. It should be the machine
 readable set of obligations that the evaluator executes.
 
-Supported requirement kinds for the initial rebuild:
+### 10.1 Primitive Obligation Kinds
+
+Supported primitive requirement kinds for the initial rebuild:
 
 1. `touch_any`
    At least one declared path or glob must be touched.
@@ -265,31 +308,72 @@ Supported requirement kinds for the initial rebuild:
 7. `manual_attestation`
    The closer must explicitly attest to a condition.
 
-The evaluator should operate over these typed obligations, not over mode names
-alone.
+### 10.2 Obligation Composition
 
-## 10. Check Classes
+The obligation language should also support simple composition so the engine can
+stay generic:
+
+1. `all_of`
+   Every child requirement must satisfy.
+2. `any_of`
+   At least one child requirement must satisfy.
+3. `n_of`
+   At least `n` child requirements must satisfy.
+
+Example:
+
+```yaml
+- kind: any_of
+  requirements:
+    - kind: touch_any
+      paths: [README.md]
+    - kind: artifact_exists
+      paths: [docs/generated/readme-preview.md]
+```
+
+### 10.3 Obligation Result Semantics
+
+Each compiled obligation should evaluate to one of:
+
+1. `satisfied`
+2. `unsatisfied`
+3. `unknown`
+4. `not_applicable`
+
+Rules:
+
+1. blocker obligations with `unknown` produce `Error`
+2. blocker obligations with `unsatisfied` produce `Blocked`
+3. attestation obligations that are unresolved produce
+   `AttestationRequired`
+4. `not_applicable` is only allowed when the compiled plan explicitly marks the
+   obligation conditional and the condition is not active
+
+The evaluator should operate over typed obligations and result states, not over
+mode names alone.
+
+## 11. Check Classes
 
 The system should distinguish three classes of checks:
 
-1. Blocker
+1. blocker
    Must pass for close to proceed.
-2. Attestation
+2. attestation
    Requires explicit human confirmation in the close path.
-3. Advisory
+3. advisory
    Never blocks close, but is shown prominently.
 
 Mapping:
 
-1. `evidence_plan` may contain blocker obligations and attestation obligations.
-2. `advisory_checks` always remain advisory.
-3. Assurance level controls how many blocker obligations are required by
-   default.
+1. `evidence_plan` may contain blocker obligations and attestation obligations
+2. `advisory_checks` always remain advisory
+3. assurance level controls how many blocker obligations are required by
+   default
 
 This is a better fit for vague cleanup work than forcing everything into either
 "hard gate" or "no gate."
 
-## 11. Assurance Model
+## 12. Assurance Model
 
 Assurance level defines the baseline rigor of the bead.
 
@@ -327,7 +411,7 @@ Baseline behavior:
 3. require structured receipts for command-style verification obligations
 4. use tighter override policy
 
-## 12. Mode Packs
+## 13. Mode Packs
 
 Modes should not exist as a pile of special cases in core code. They should be
 resolved as rule packs that define defaults and minimums.
@@ -363,27 +447,29 @@ Examples:
 5. `security`
    Minimum `strict`
 
-## 13. Obligation Compilation
+## 14. Compilation Model
 
-Close evaluation should be driven by a compiled obligation set.
+Close evaluation should be driven by a compiled plan.
 
 Compilation order:
 
-1. validate the canonical contract
+1. validate the authored contract
 2. resolve the mode pack
 3. resolve the assurance profile
-4. add universal invariants
-5. add assurance-level defaults
-6. add mode-pack defaults
-7. add explicit contract obligations from `evidence_plan`
-8. append advisory checks
+4. materialize a `ResolvedContract`
+5. add universal invariants
+6. add assurance-level defaults
+7. add mode-pack defaults
+8. add explicit contract obligations from `evidence_plan`
+9. classify obligations as blocker or attestation
+10. append advisory checks
 
-This produces one flat set of obligations that the evaluator checks.
+This produces one compiled plan that the evaluator checks.
 
 That is simpler and more robust than scattering logic across many rule-specific
 branches.
 
-## 14. Universal Invariants
+## 15. Universal Invariants
 
 These apply to every close attempt:
 
@@ -403,32 +489,6 @@ Examples of operational uncertainty:
 4. policy loading or schema validation fails
 5. receipt or override journaling fails
 
-## 15. Commands
-
-Recommended command surface for the rebuild:
-
-1. `contract init`
-   Create a starter contract for a bead.
-2. `contract derive`
-   Derive a provisional contract for a legacy bead.
-3. `contract normalize`
-   Normalize and validate contract formatting.
-4. `lint-bead`
-   Validate contract quality and required structure.
-5. `preclose`
-   Evaluate close readiness using current state.
-6. `safe-close`
-   Run evaluation and call `br close` only if allowed.
-7. `audit`
-   Review already closed beads and detect bypasses.
-8. `simulate`
-   Replay a policy or contract against selected beads without changing state.
-9. `policy-check`
-   Validate and print the effective policy.
-
-This command set makes the rebuild useful for authoring, migration, evaluation,
-and rollout, not just final gating.
-
 ## 16. Evaluation Pipeline
 
 The close path should stay simple.
@@ -436,27 +496,95 @@ The close path should stay simple.
 ### `preclose`
 
 1. load current issue, policy, dependency, and repo state
-2. resolve the canonical contract
-3. compile obligations
-4. collect only the evidence needed for those obligations
-5. return a decision
+2. resolve the authored contract into a resolved contract
+3. compile a plan
+4. collect only the evidence needed for that plan
+5. evaluate obligations
+6. return a decision
 
 ### `safe-close`
 
 1. rerun the full `preclose` evaluation immediately before close
-2. if blockers remain, do not call `br close`
-3. if allowed, call `br close`
-4. if `br close` fails, return operational error
+2. if the outcome is `Blocked`, do not call `br close`
+3. if the outcome is `AttestationRequired`, require explicit attestation inputs
+   and rerun evaluation
+4. if the outcome is `Allowed`, call `br close`
+5. if `br close` fails, return `Error`
 
 Explicit anti-goal:
 
-1. Do not build a reusable snapshot-token or deferred-approval workflow into
-   the first rebuild.
+1. do not build a reusable snapshot-token or deferred-approval workflow into
+   the first rebuild
 
 The system should prefer fresh evaluation at close time over a more complicated
 state machine.
 
-## 17. Structured Close Evidence and Receipts
+## 17. Decision Outcomes and Exit Codes
+
+The decision model must be explicit.
+
+### `Allowed`
+
+Meaning:
+
+1. evaluation completed successfully
+2. no blocker obligations are unsatisfied
+3. no required attestation obligations remain unresolved
+
+CLI behavior:
+
+1. exit code `0`
+2. `safe-close` may call `br close`
+
+### `Blocked`
+
+Meaning:
+
+1. evaluation completed successfully
+2. one or more blocker obligations are unsatisfied
+
+CLI behavior:
+
+1. exit code `1`
+2. `safe-close` must not call `br close`
+
+### `Error`
+
+Meaning:
+
+1. the tool could not make a trustworthy decision
+2. this is an operational or integrity failure, not a normal unmet-work failure
+
+Examples:
+
+1. contract parse failure
+2. policy parse failure
+3. upstream `br` or `bv` payload unreadable
+4. git query failure
+5. receipt or attestation journaling failure
+
+CLI behavior:
+
+1. exit code `2`
+2. `safe-close` must not call `br close`
+3. `Error` is non-overridable
+
+### `AttestationRequired`
+
+Meaning:
+
+1. evaluation completed successfully
+2. no blocker obligations are unsatisfied
+3. one or more required attestation obligations remain unresolved
+
+CLI behavior:
+
+1. exit code `3`
+2. `safe-close` must not call `br close` until the required attestations are
+   supplied explicitly
+3. supplied attestations must be recorded before the final close attempt
+
+## 18. Structured Close Evidence and Receipts
 
 Strict command-style evidence should be stronger than free text.
 
@@ -480,7 +608,7 @@ Receipts may be stored under a tool-owned path such as:
 This gives `strict` mode a reliable proof surface without requiring a larger
 workflow engine.
 
-## 18. Manual Attestations
+## 19. Manual Attestations
 
 Some work is real but not naturally machine-provable.
 
@@ -498,11 +626,13 @@ Requirements:
 1. attestations must be explicit
 2. attestations must be recorded in the close path
 3. attestations should appear in output and logs clearly
+4. attestation obligations should be allowed mainly for `minimal` work unless a
+   mode pack explicitly permits them at a higher level
 
 This gives low-risk vague work a structured prompt path without pretending it
 can always be proven mechanically.
 
-## 19. Policy Model
+## 20. Policy Model
 
 Policy should tune the engine, not define the entire engine.
 
@@ -573,7 +703,82 @@ Example effective policy shape:
 }
 ```
 
-## 20. Output Model
+## 21. Commands
+
+Recommended command surface for the rebuild:
+
+1. `contract init`
+   Create a starter contract for a bead.
+2. `contract derive`
+   Derive a provisional contract for a legacy bead.
+3. `contract normalize`
+   Normalize and validate contract formatting.
+4. `lint-bead`
+   Validate contract quality and required structure.
+5. `preclose`
+   Evaluate close readiness using current state.
+6. `safe-close`
+   Run evaluation and call `br close` only if allowed.
+7. `audit`
+   Review already closed beads and detect bypasses.
+8. `simulate`
+   Replay a policy or contract against selected beads without changing state.
+9. `policy-check`
+   Validate and print the effective policy.
+
+This command set makes the rebuild useful for authoring, migration, evaluation,
+and rollout, not just final gating.
+
+## 22. Packaging, Installation, and CLI Contract
+
+This section is required because the repo installer only symlinks top-level
+executable files under each tool directory.
+
+Required packaging contract:
+
+1. the supported command name remains `br-closeout-audit`
+2. the repo must continue to expose a top-level executable at
+   `tools/br-closeout-audit/br-closeout-audit`
+3. that top-level executable may be either:
+   1. the Rust binary itself
+   2. a minimal non-Python launcher that execs a co-located Rust binary
+4. the Rust implementation must not require the Python v1 runtime to launch
+5. the install path must remain compatible with `./install.sh`
+
+Recommended source and artifact layout:
+
+```text
+tools/br-closeout-audit/
+├── br-closeout-audit           # stable installed entrypoint
+├── README.md
+├── rust/                       # Cargo crate for the rebuild
+└── bin/
+    └── br-closeout-audit       # built Rust binary or release artifact
+```
+
+Build and install requirements:
+
+1. local development must document an explicit Cargo build command
+2. if the stable entrypoint is a launcher, it must fail with a clear error when
+   the Rust binary is missing
+3. release packaging must define how the built binary lands under the tool
+   directory before `./install.sh` runs
+4. automation-facing commands must support stable exit codes and `--json`
+   outputs
+
+CLI contract:
+
+1. `preclose`, `safe-close`, `audit`, `simulate`, and `policy-check` must all
+   support `--json`
+2. evaluation commands must use the outcome exit codes defined in this spec
+3. `safe-close` must expose explicit attestation flags for
+   `AttestationRequired` outcomes
+4. CLI parse and usage errors should be distinct from evaluation outcomes
+
+This keeps the rebuild operationally shippable instead of leaving packaging
+decisions to implementation drift.
+
+## 23. Output Model
 
 Outputs should expose the decision trace clearly.
 
@@ -582,29 +787,32 @@ Text mode should always show:
 1. issue and contract summary
 2. effective mode and assurance level
 3. compiled obligations
-4. blockers
-5. required attestations
-6. advisories
-7. remediation
+4. obligation results
+5. blockers
+6. required attestations
+7. advisories
+8. remediation
 
 JSON mode should include:
 
 1. `output_version`
 2. `issue_id`
-3. `effective_mode`
-4. `effective_assurance_level`
-5. `contract_source`
-6. `obligations`
-7. `obligation_results`
-8. `blockers`
-9. `required_attestations`
-10. `advisories`
-11. `receipts_used`
-12. `policy_name`
+3. `outcome`
+4. `effective_mode`
+5. `effective_assurance_level`
+6. `contract_source`
+7. `compiled_plan`
+8. `obligation_results`
+9. `blockers`
+10. `required_attestations`
+11. `advisories`
+12. `receipts_used`
+13. `policy_name`
+14. `operational_error`
 
 This makes the system explainable and tunable.
 
-## 21. Override Model
+## 24. Override Model
 
 Overrides should be explicit and classed.
 
@@ -627,7 +835,7 @@ Suggested log path:
 
 1. `.ntm/closeout-audit/override-log.jsonl`
 
-## 22. Bypass Detection
+## 25. Bypass Detection
 
 Until close hooks are universal, direct `br close` remains a bypass path.
 
@@ -636,10 +844,11 @@ Until close hooks are universal, direct `br close` remains a bypass path.
 1. beads closed without going through the supported close path
 2. closeouts with missing required obligations
 3. closeouts where evidence exists but does not satisfy the contract
+4. closeouts that should have had attestations or receipts but do not
 
 This keeps the rebuild useful even before all close paths are enforced.
 
-## 23. Performance Design
+## 26. Performance Design
 
 Performance should be designed, not wished for.
 
@@ -656,7 +865,7 @@ Initial target:
 
 1. median single-issue `preclose` under 1 second on warm local state
 
-## 24. Simulation and Replay
+## 27. Simulation and Replay
 
 The rebuild should include a simulation tool from the start.
 
@@ -665,25 +874,28 @@ The rebuild should include a simulation tool from the start.
 1. running the current policy against selected beads
 2. replaying historical beads against a proposed policy
 3. comparing decision deltas between two policy versions
+4. replaying the conformance corpus as a deterministic acceptance check
 
 This makes rollout safer and gives policy tuning a real feedback loop.
 
-## 25. Testing Strategy
+## 28. Testing Strategy
 
-## 25.1 Unit Tests
+### 28.1 Unit Tests
 
 1. adapter parsing and normalization
-2. canonical model validation
-3. obligation compilation
-4. assurance profile resolution
-5. mode-pack resolution
-6. evidence requirement evaluation
-7. receipt parsing
-8. manual attestation handling
-9. override classification
-10. fail-closed behavior
+2. authored contract validation
+3. resolved contract construction
+4. compiled plan generation
+5. obligation composition semantics
+6. obligation result classification
+7. assurance profile resolution
+8. mode-pack resolution
+9. receipt parsing
+10. manual attestation handling
+11. override classification
+12. fail-closed behavior
 
-## 25.2 Integration Tests
+### 28.2 Integration Tests
 
 1. docs bead requiring `README.md` touch
 2. cleanup bead using manual attestation
@@ -694,7 +906,7 @@ This makes rollout safer and gives policy tuning a real feedback loop.
 7. override journaling failure
 8. `br close` failure after successful evaluation
 
-## 25.3 Parser and Drift Tests
+### 28.3 Parser and Drift Tests
 
 1. malformed YAML contracts
 2. legacy-derived contracts
@@ -702,21 +914,76 @@ This makes rollout safer and gives policy tuning a real feedback loop.
 4. multiple `bv` payload shapes
 5. property tests for policy merge behavior
 
-## 25.4 Golden Output Tests
+### 28.4 Golden Output Tests
 
 1. text decision traces
 2. JSON decision traces
 3. simulation output
 4. override output
 
-## 26. Rollout Plan
+## 29. Conformance Corpus
+
+The rebuild should ship with a versioned conformance corpus. This corpus is the
+behavior contract for the system, not just a convenience test fixture.
+
+Recommended layout:
+
+```text
+tools/br-closeout-audit/tests/corpus/
+  <scenario-id>/
+    manifest.yaml
+    issue.json
+    policy.json
+    dependencies.json
+    close_input.json
+    receipts/
+    repo/
+    expected/
+      authored_contract.json
+      resolved_contract.json
+      compiled_plan.json
+      decision.json
+      text_output.txt
+```
+
+Fixture rules:
+
+1. `manifest.yaml` declares the scenario ID, command under test, expected
+   outcome, and expected exit code
+2. `issue.json` stores the raw issue payload seen by adapters
+3. `policy.json` stores the effective policy for that case
+4. `repo/` stores the minimal repo fixture needed for evaluation
+5. `close_input.json` stores close-reason fields and attestation inputs where
+   relevant
+6. `expected/` stores canonical intermediate and final outputs
+
+Required scenario classes:
+
+1. authored contract allowed
+2. authored contract blocked
+3. attestation required
+4. operational error
+5. legacy-derived contract
+6. strict receipt missing
+7. strict receipt present
+8. mode-floor enforcement
+9. override allowed
+10. override denied
+11. bypass detected by audit
+12. parser drift for `br`
+13. parser drift for `bv`
+
+The corpus should be runnable both as test fixtures and via `simulate`.
+
+## 30. Rollout Plan
 
 ## Phase 0: Freeze the Core Model
 
-1. freeze the canonical internal model
-2. freeze the obligation types
+1. freeze the authored, resolved, and compiled models
+2. freeze the obligation language and result semantics
 3. freeze the assurance model
 4. freeze the mode-pack model
+5. freeze the CLI outcome contract
 
 ## Phase 1: Build the Engine
 
@@ -743,58 +1010,79 @@ This makes rollout safer and gives policy tuning a real feedback loop.
 ## Phase 4: Build Replay and Policy Tooling
 
 1. ship `simulate`
-2. tune mode packs and assurance defaults
-3. validate real-repo adoption
+2. ship the conformance corpus runner
+3. tune mode packs and assurance defaults
+4. validate real-repo adoption
 
 ## Phase 5: Cut Over
 
 1. make the rebuilt Rust tool the supported path
-2. remove v1 code
-3. remove v1-only docs
+2. remove the existing tool implementation
+3. remove v1-only docs and configs
 
-## 27. Cutover and Decommissioning
+## 31. Cutover and Decommissioning
 
-This rebuild should end with a clean cutover.
+This rebuild should end with a clean cutover and deletion of the old tool.
 
-Required cutover actions:
+Two acceptable decommission paths:
 
-1. remove the Python implementation from production use
-2. replace the top-level executable with the Rust binary or a thin non-Python
-   launcher
-3. remove v1-only parsing paths that are no longer needed
-4. retain only the migration tools needed for old beads still in flight
+1. immediate removal path
+   If operators do not need the current tool during the rebuild, remove the
+   existing implementation early and build the Rust tool as the only supported
+   code path.
+2. parallel build path
+   If operators still need the current tool during development, freeze it,
+   build the Rust tool in parallel, replace the stable entrypoint at cutover,
+   then delete the existing implementation immediately after cutover.
+
+Required end state regardless of path:
+
+1. the existing Python implementation is removed from the repo
+2. the installed `br-closeout-audit` entrypoint resolves to the Rust rebuild
+3. v1-only parsing, docs, and config assumptions are removed
+4. only deliberate migration helpers remain, if still needed for in-flight
+   beads
 
 Explicit anti-goal:
 
-1. Do not preserve the Python runtime as a permanent fallback.
+1. do not preserve the Python runtime as a permanent fallback
 
-## 28. Definition of Done
+## 32. Definition of Done
 
 The rebuild is complete when all are true:
 
-1. the Rust implementation uses a canonical internal model
+1. the Rust implementation uses authored, resolved, and compiled canonical
+   models
 2. the evaluator runs on compiled obligations, not raw Markdown heuristics
 3. `evidence_plan` is executable
-4. low-risk beads can use lightweight path obligations and attestations
-5. strict beads can require stronger receipts
-6. `lint-bead`, `preclose`, `safe-close`, `audit`, `simulate`, and
+4. the obligation language supports composition and explicit result semantics
+5. low-risk beads can use lightweight path obligations and attestations
+6. strict beads can require stronger receipts
+7. `lint-bead`, `preclose`, `safe-close`, `audit`, `simulate`, and
    `policy-check` all work
-7. decision outputs are explainable in text and JSON
-8. performance targets are met
-9. at least one real repo uses the rebuilt close path
-10. the Python v1 implementation has been removed
+8. packaging and install behavior are documented and implemented
+9. decision outputs are explainable in text and JSON
+10. the conformance corpus passes
+11. performance targets are met
+12. at least one real repo uses the rebuilt close path
+13. the existing Python implementation has been removed
 
-## 29. Immediate Next Steps
+## 33. Immediate Next Steps
 
-1. freeze the canonical type model
-2. freeze the initial obligation kinds
-3. freeze the assurance profiles and mode packs
-4. write one canonical contract example for each of `docs`, `cleanup`, `code`,
+1. freeze the authored, resolved, and compiled type model
+2. freeze the primitive and composite obligation kinds
+3. freeze obligation result semantics and exit codes
+4. freeze the assurance profiles and mode packs
+5. write one canonical contract example for each of `docs`, `cleanup`, `code`,
    `migration`, and `security`
-5. scaffold the Rust crate around adapters, compiler, evaluator, and output
+6. define the stable tool layout and launcher contract under
+   `tools/br-closeout-audit/`
+7. scaffold the Rust crate around adapters, compiler, evaluator, and output
    modules
-6. implement `contract init`, `lint-bead`, and `preclose` first
-7. implement receipts and manual attestation support
-8. implement `safe-close`
-9. implement `simulate`
-10. remove v1 after cutover criteria are met
+8. implement `contract init`, `lint-bead`, and `preclose` first
+9. implement receipts and manual attestation support
+10. implement the conformance corpus runner
+11. implement `safe-close`
+12. implement `simulate`
+13. choose the immediate-removal or parallel-build decommission path and remove
+    the existing tool accordingly
