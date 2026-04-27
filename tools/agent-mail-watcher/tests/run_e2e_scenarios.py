@@ -240,6 +240,7 @@ def run_decision_scenario(
 
     actual = {
         "decision": decision,
+        "expected_decision": expected_decision,
         "reason": reason,
         "explanation": explanation,
         "work_state": state.to_json(),
@@ -452,20 +453,139 @@ def main() -> int:
     overall_ok = not failures
     recorder.finalize(ok=overall_ok)
 
-    print(f"=== vgd.10.4 scripted e2e: {run_id} ===")
+    # vgd.10.5: enrich the diagnostic surface so a failed run is
+    # self-explanatory rather than forcing an operator to walk the
+    # nested scenarios/ tree by hand.
+    summary_path = _write_summary_index(
+        artifact_root=artifact_root,
+        recorder=recorder,
+        run_id=run_id,
+        passes=passes,
+        failures=failures,
+    )
+    _write_latest_run_pointer(
+        artifact_parent=ARTIFACT_PARENT,
+        artifact_root=artifact_root,
+        run_id=run_id,
+    )
+
+    print(f"=== AMW v2 scripted e2e: {run_id} ===")
     print(f"  total scenarios: {total}")
     print(f"  passed: {len(passes)}")
     print(f"  failed: {len(failures)}")
     print(f"  artifact root: {artifact_root}")
-    print(f"  manifest: {recorder.manifest_path}")
+    print(f"  summary index: {summary_path}")
+    print(f"  full manifest: {recorder.manifest_path}")
+    print(f"  latest pointer: {ARTIFACT_PARENT / 'LATEST_RUN'}")
     if failures:
-        print("  failure detail:")
+        print()
+        print("  FAILED scenarios — inspect first:")
         for sid, blk in failures:
-            print(
-                f"    [{sid}] expected={blk.get('expected') or blk.get('match')!r} "
-                f"actual={blk.get('actual') or blk.get('decision')!r}"
-            )
+            scenario_dir = recorder.scenarios_dir / sid
+            print(f"    [{sid}]")
+            print(f"      scenario dir: {scenario_dir}")
+            print(f"      manifest:     {scenario_dir / 'manifest.json'}")
+            expected_repr = blk.get("expected_decision") or blk.get("expected") or "(see manifest expected block)"
+            actual_repr = blk.get("decision") or blk.get("actual") or "(see manifest actual block)"
+            print(f"      expected:     {expected_repr!r}")
+            print(f"      actual:       {actual_repr!r}")
+            if blk.get("explanation"):
+                print(f"      explanation:  {blk['explanation']!r}")
     return 0 if overall_ok else 1
+
+
+def _write_summary_index(
+    *,
+    artifact_root: pathlib.Path,
+    recorder: Any,
+    run_id: str,
+    passes: list[str],
+    failures: list[tuple[str, dict[str, Any]]],
+) -> pathlib.Path:
+    """Write summary.json next to the recorder's manifest.
+
+    summary.json is the "first artifact an operator should inspect" per
+    vgd.10.5 AC: a flat per-scenario index of expected/actual + the
+    most relevant artifact paths so failures are diagnosable from one
+    file. Distinct from the recorder's manifest.json (which is the
+    full per-run record) so docs and rollout notes can link a stable
+    `summary.json` path without depending on the recorder's schema.
+    """
+    failure_set = {sid for sid, _ in failures}
+    rows: list[dict[str, Any]] = []
+    for entry in recorder.scenarios:
+        scenario_id = entry.get("scenario_id")
+        scenario_dir = recorder.scenarios_dir / scenario_id
+        actual_block = entry.get("actual") or {}
+        expected_block = entry.get("expected") or {}
+        rows.append(
+            {
+                "scenario_id": scenario_id,
+                "description": entry.get("description"),
+                "passed": scenario_id not in failure_set,
+                "expected": expected_block,
+                "actual_summary": {
+                    "match": actual_block.get("match"),
+                    "decision": actual_block.get("decision"),
+                    "reason": actual_block.get("reason"),
+                    "explanation": actual_block.get("explanation"),
+                },
+                "first_look_paths": {
+                    "scenario_dir": str(scenario_dir),
+                    "scenario_manifest": str(scenario_dir / "manifest.json"),
+                    "events": str(scenario_dir / "events.json"),
+                    "watcher_state": str(scenario_dir / "watcher-state.json"),
+                },
+            }
+        )
+    summary_payload = {
+        "run_id": run_id,
+        "ok": not failures,
+        "passed_count": len(passes),
+        "failed_count": len(failures),
+        "failed_scenario_ids": sorted(failure_set),
+        "artifact_root": str(artifact_root),
+        "scenarios": rows,
+        # Pointers operators are most likely to want first.
+        "inspect_first": (
+            [str(recorder.scenarios_dir / sid / "manifest.json") for sid in sorted(failure_set)]
+            if failures
+            else [str(recorder.manifest_path)]
+        ),
+    }
+    import json
+
+    summary_path = artifact_root / "summary.json"
+    tmp_path = summary_path.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(summary_payload, handle, indent=2, sort_keys=True)
+    tmp_path.replace(summary_path)
+    return summary_path
+
+
+def _write_latest_run_pointer(
+    *,
+    artifact_parent: pathlib.Path,
+    artifact_root: pathlib.Path,
+    run_id: str,
+) -> None:
+    """Write a stable `LATEST_RUN` pointer file alongside the per-run
+    bundles. Operators and docs can refer to
+    `tools/agent-mail-watcher/tests/_e2e_scenarios/LATEST_RUN` to find
+    the most recent run without timestamp guessing. Plain text rather
+    than a symlink so it survives rsync/zip/cross-platform copies that
+    don't preserve symlinks. Atomically replaced via a temp + rename.
+    """
+    pointer_path = artifact_parent / "LATEST_RUN"
+    tmp_path = pointer_path.with_suffix(".tmp")
+    body = (
+        f"{run_id}\n"
+        f"# Most recent run dir (relative to this file): {artifact_root.name}\n"
+        f"# Full manifest: {artifact_root.name}/manifest.json\n"
+        f"# First-look summary: {artifact_root.name}/summary.json\n"
+    )
+    tmp_path.write_text(body, encoding="utf-8")
+    tmp_path.replace(pointer_path)
 
 
 if __name__ == "__main__":
