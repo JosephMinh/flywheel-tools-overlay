@@ -401,5 +401,66 @@ class TestExplanationDistinguishesStates(unittest.TestCase):
         self.assertNotIn("disabled", text.lower())
 
 
+class TestPolicyDecisionAndExplanationStaySynced(unittest.TestCase):
+    """beads_gate_decision and beads_gate_status_explanation must stay in lockstep.
+
+    The vgd.6.3 design rule is that the explanation derives from policy logic
+    rather than hand-maintained prose, so any future change to the decision
+    matrix must move the explanation along with it. This test pins that
+    relationship: for every (severity, work_state) pair, if the decision
+    suppresses, the matching wake_allowed boolean is False, and the
+    explanation never claims the wake will land.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.amw = load_amw()
+
+    def test_decision_drives_explanation_consistency(self) -> None:
+        ProjectWorkState = self.amw["ProjectWorkState"]
+        beads_gate_decision = self.amw["beads_gate_decision"]
+        explain = self.amw["beads_gate_status_explanation"]
+        SUP_OPEN = self.amw["POLICY_DECISION_SUPPRESS_NO_OPEN"]
+        SUP_READY = self.amw["POLICY_DECISION_SUPPRESS_NO_READY"]
+
+        class FakeConfig:
+            beads_gate_enabled = True
+
+        cases = [
+            ("ready", 5, 2),
+            ("zero-ready", 5, 0),
+            ("zero-open", 0, 0),
+        ]
+        for label, open_count, ready_count in cases:
+            ws = ProjectWorkState(
+                repo_root=None,
+                source="canonical-project",
+                available=True,
+                open_count=open_count,
+                ready_count=ready_count,
+                in_progress_count=0,
+            )
+            normal_decision, _ = beads_gate_decision("normal", ws)
+            text = explain(FakeConfig(), ws)
+            if normal_decision == SUP_OPEN:
+                self.assertIn(
+                    "no open beads",
+                    text.lower(),
+                    f"{label}: decision says SUPPRESS_NO_OPEN but explanation "
+                    f"text {text!r} doesn't mention 'no open beads'",
+                )
+            elif normal_decision == SUP_READY:
+                self.assertIn(
+                    "no ready beads",
+                    text.lower(),
+                    f"{label}: decision says SUPPRESS_NO_READY but explanation "
+                    f"text {text!r} doesn't mention 'no ready beads'",
+                )
+            else:
+                # WAKE: explanation should not claim suppression
+                self.assertNotIn("only urgent", text.lower())
+                self.assertNotIn("only high and urgent", text.lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
