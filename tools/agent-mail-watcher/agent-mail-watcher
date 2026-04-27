@@ -3514,6 +3514,72 @@ def setup_self_test_beads_repo(workspace: pathlib.Path) -> pathlib.Path:
     return workspace
 
 
+SELF_TEST_BEADS_SCENARIOS = ("zero-open", "open-zero-ready", "ready")
+SELF_TEST_BEADS_EXPECTED_COUNTS: dict[str, dict[str, int]] = {
+    "zero-open": {"open_count": 0, "ready_count": 0},
+    "open-zero-ready": {"open_count": 1, "ready_count": 0},
+    "ready": {"open_count": 1, "ready_count": 1},
+}
+
+
+def seed_self_test_beads_state(
+    repo_root: pathlib.Path,
+    scenario: str,
+) -> dict[str, int]:
+    if scenario not in SELF_TEST_BEADS_EXPECTED_COUNTS:
+        raise ValueError(
+            f"unknown self-test beads scenario {scenario!r}; "
+            f"expected one of {SELF_TEST_BEADS_SCENARIOS}"
+        )
+    if scenario == "zero-open":
+        create_result = run_command(
+            ["br", "--json", "create", "self-test seed (zero-open)", "-p", "1"],
+            cwd=repo_root,
+        )
+        issue_id = json.loads(create_result.stdout)["id"]
+        run_command(
+            ["br", "close", issue_id, "-r", "self-test seed (zero-open)"],
+            cwd=repo_root,
+        )
+    elif scenario == "open-zero-ready":
+        # Defer at create time so the issue is open but never ready.
+        run_command(
+            [
+                "br",
+                "create",
+                "self-test seed (open-zero-ready)",
+                "-p",
+                "1",
+                "--defer",
+                "+30d",
+            ],
+            cwd=repo_root,
+        )
+    else:
+        run_command(
+            ["br", "create", "self-test seed (ready)", "-p", "1"],
+            cwd=repo_root,
+        )
+
+    stats_result = run_command(
+        ["br", "--json", "--no-auto-flush", "--no-auto-import", "stats"],
+        cwd=repo_root,
+    )
+    summary = json.loads(stats_result.stdout or "{}").get("summary") or {}
+    counts = {
+        "open_count": parse_int(summary.get("open_issues", 0), 0),
+        "ready_count": parse_int(summary.get("ready_issues", 0), 0),
+        "in_progress_count": parse_int(summary.get("in_progress_issues", 0), 0),
+    }
+    for key, want in SELF_TEST_BEADS_EXPECTED_COUNTS[scenario].items():
+        if counts[key] != want:
+            raise RuntimeError(
+                f"self-test seed {scenario}: {key}={counts[key]}, expected {want} "
+                f"(full counts: {counts})"
+            )
+    return counts
+
+
 def create_self_test_pane(
     *,
     session_name: str,
