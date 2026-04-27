@@ -2241,6 +2241,29 @@ def beads_gate_decision(importance: str, work_state: ProjectWorkState) -> tuple[
     return POLICY_DECISION_WAKE, None
 
 
+def beads_gate_status_explanation(
+    config: "Config", work_state: ProjectWorkState
+) -> str:
+    if not config.beads_gate_enabled:
+        return "policy disabled — pre-v2 wake behavior preserved"
+    if not work_state.available:
+        error = work_state.error or "unknown"
+        return (
+            f"work state unavailable ({error}) — failing open, all wakes proceed"
+        )
+    open_count = work_state.open_count or 0
+    ready_count = work_state.ready_count or 0
+    decision_normal, _ = beads_gate_decision("normal", work_state)
+    if decision_normal == POLICY_DECISION_SUPPRESS_NO_OPEN:
+        return "no open beads — only urgent wakes will land"
+    if decision_normal == POLICY_DECISION_SUPPRESS_NO_READY:
+        return (
+            f"open but no ready beads ({open_count} open) — "
+            "only high and urgent wakes will land"
+        )
+    return f"{open_count} open, {ready_count} ready — all wakes proceed normally"
+
+
 def work_state_event_fields(work_state: ProjectWorkState | None) -> dict[str, Any]:
     if work_state is None:
         return {
@@ -3478,6 +3501,9 @@ def command_status(config: Config) -> int:
             entry["normal_wake_allowed"] = True
             entry["high_wake_allowed"] = True
             entry["urgent_wake_allowed"] = True
+        entry["beads_gate_explanation"] = beads_gate_status_explanation(
+            config, work_state
+        )
         binding_statuses[key] = entry
     payload = {
         "config": config.to_json(),
