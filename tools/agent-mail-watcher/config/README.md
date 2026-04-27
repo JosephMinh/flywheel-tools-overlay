@@ -158,6 +158,47 @@ Whenever the watcher cannot trust the counts, the gate must not suppress. The co
 
 In every fail-open case, `work_state_available` is `false`, `work_state_error` carries the underlying reason, `beads_gate_explanation` reads `work state unavailable (<error>) — failing open, all wakes proceed`, and the existing wake path runs as if the gate were disabled. The watcher must never lose a wake because of a transient `br` problem.
 
+### Verification stack
+
+Use the verification commands in ascending cost.
+
+| Scope | Command | Typical cost | Use when |
+| --- | --- | --- | --- |
+| Syntax sanity | `python3 -m py_compile tools/agent-mail-watcher/agent-mail-watcher` | under 1 second | Confirm the watcher script still parses after a local edit. |
+| Fast unit and contract sweep | `python3 -m unittest discover -s tools/agent-mail-watcher/tests` | seconds | Main local regression pass. Covers config-flag contracts, policy matrix tests, work-state selection, artifact helpers, e2e smoke checks, and non-goal / guardrail regressions without requiring live tmux. |
+| Targeted config and policy contracts | `python3 tools/agent-mail-watcher/tests/test_beads_gate_v2.py` | seconds | Focused pass for `beads_gate_enabled`, disabled-mode compatibility, and status/event field contracts. |
+| Targeted guardrail regression checks | `python3 tools/agent-mail-watcher/tests/test_non_goals_and_guardrails.py` | seconds | Prove `ack_required` and `thread_id` stay out of the gate and that busy suppression, ownership checks, and provider-identity helpers remain authoritative. |
+| Targeted work-state selection checks | `python3 tools/agent-mail-watcher/tests/test_work_state_selection.py` | seconds | Validate pane-worktree vs canonical fallback behavior without running the live self-test. |
+| Scripted e2e matrix | `python3 tools/agent-mail-watcher/tests/run_e2e_scenarios.py` | seconds | Run the tmux-free end-to-end policy matrix for zero-open, open-zero-ready, ready, disabled-mode, unavailable, fail-open, and shell-only-target cases. |
+| E2E smoke wrapper | `python3 tools/agent-mail-watcher/tests/test_e2e_runner_smoke.py` | under 2 minutes | Re-run the scripted e2e suite as a subprocess and pin the `summary.json`, `LATEST_RUN`, and read-only observer guarantees. |
+| Live tmux self-test | `tools/agent-mail-watcher/agent-mail-watcher self-test` | about 30 seconds or more | Highest-fidelity watcher check. Exercises real prompt delivery, busy suppression, prompt consumption, cross-project routing, shared-session scrubbing, divergent-worktree fallback, pane-worktree preference, and auto-create behavior. |
+| Gated self-test unittest | `AMW_RUN_SELF_TEST=1 python3 tools/agent-mail-watcher/tests/test_self_test_invariants.py` | about 30 seconds or more | Run the heavy `self-test` path from `unittest` when you want the tmux-backed validation plus an assertion that `ok=true`, `artifact_scenario_count` is healthy, and the manifest exists. |
+
+Fast local checks are the first five rows. The last three rows are broader rollout gates and should be run before enabling `beads_gate_enabled` on a real machine.
+
+### Artifact locations
+
+- `agent-mail-watcher self-test` writes to `/home/ubuntu/.local/state/agent-mail-watcher-selftest/<run-id>/`.
+- The self-test bundle entry point is `/home/ubuntu/.local/state/agent-mail-watcher-selftest/<run-id>/artifacts/manifest.json`.
+- Scripted e2e runs write to `tools/agent-mail-watcher/tests/_e2e_scenarios/<run-id>/`.
+- `tools/agent-mail-watcher/tests/_e2e_scenarios/LATEST_RUN` is the stable pointer to the most recent e2e run.
+- The e2e bundle entry point is `tools/agent-mail-watcher/tests/_e2e_scenarios/<run-id>/summary.json`.
+
+Recommended inspection order after a failure:
+
+1. Open the run-level manifest first.
+   Self-test: `artifacts/manifest.json`
+   Scripted e2e: `summary.json`
+2. Identify the failing scenario id and open that scenario manifest next.
+   Self-test: `artifacts/scenarios/<scenario-id>/manifest.json`
+   Scripted e2e: `scenarios/<scenario-id>/manifest.json`
+3. Inspect the scenario-local watcher outputs.
+   Self-test: `watcher-state.json`, `watcher-events-tail.json`, `pane-captures.json`, `command-outcomes.json`
+   Scripted e2e: the `first_look_paths` entries in `summary.json`, especially `events`, `watcher_state`, and `scenario_manifest`
+4. Use the stable pointer files when you are sharing evidence in notes or mail.
+   Self-test: paste the absolute `artifact_manifest` path from the command output
+   Scripted e2e: paste `tools/agent-mail-watcher/tests/_e2e_scenarios/LATEST_RUN` plus the referenced `summary.json`
+
 ## Retry And Log Caps
 
 - An undelivered signal gets one initial processing attempt plus at most `5` retries.

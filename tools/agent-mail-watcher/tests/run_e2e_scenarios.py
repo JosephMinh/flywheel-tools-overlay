@@ -22,6 +22,12 @@ Usage:
 
 Exits 0 on full-suite pass, 1 if any scenario fails.
 
+Artifacts:
+
+- Per-run bundles land under `tools/agent-mail-watcher/tests/_e2e_scenarios/<run-id>/`.
+- `tools/agent-mail-watcher/tests/_e2e_scenarios/LATEST_RUN` is the stable pointer to the most recent run.
+- Inspect `<run-id>/summary.json` first, then the per-scenario `manifest.json` named in `first_look_paths`.
+
 Why a separate runner instead of extending command_self_test:
 - This stays runnable without tmux and finishes in seconds, so it can
   live inside CI / pre-rollout checks without flakiness.
