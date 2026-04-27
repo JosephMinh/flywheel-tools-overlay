@@ -7,6 +7,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -322,6 +324,7 @@ class BootstrapResult:
     session: str = ""
     session_spawned: bool = False
     session_reused: bool = False
+    session_attached: bool = False
     prompt_template: str = ""
     prompt_pane: int | None = None
     plan_file: str = ""
@@ -344,6 +347,7 @@ class BootstrapResult:
             "session": self.session,
             "session_spawned": self.session_spawned,
             "session_reused": self.session_reused,
+            "session_attached": self.session_attached,
             "prompt_template": self.prompt_template,
             "prompt_pane": self.prompt_pane,
             "plan_file": self.plan_file,
@@ -813,6 +817,137 @@ def send_prompt(
         run_command(cmd, cwd=project_dir, timeout=180)
 
 
+def interactive_terminal_available() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def inside_tmux() -> bool:
+    return bool(os.environ.get("TMUX", "").strip())
+
+
+def should_auto_attach(args: argparse.Namespace) -> bool:
+    return (
+        not args.no_spawn
+        and not args.dry_run
+        and not args.json
+        and interactive_terminal_available()
+    )
+
+
+def attach_session(session: str, project_dir: Path) -> None:
+    cmd = ["ntm", "attach", session]
+    try:
+        proc = subprocess.run(cmd, cwd=str(project_dir), check=False)
+    except FileNotFoundError as exc:
+        raise BootstrapError(f"required command not found: {cmd[0]}") from exc
+
+    if proc.returncode != 0:
+        raise BootstrapError(f"command failed: {' '.join(cmd)}")
+
+
+def start_delayed_prompt_send(
+    session: str,
+    pane: int,
+    template_name: str,
+    plan_abs_path: Path,
+    plan_display_name: str,
+    project_dir: Path,
+    errors: list[str],
+    delay_seconds: float = 0.5,
+) -> threading.Thread:
+    def worker() -> None:
+        try:
+            time.sleep(delay_seconds)
+            send_prompt(
+                session,
+                pane,
+                template_name,
+                plan_abs_path,
+                plan_display_name,
+                project_dir,
+                False,
+            )
+        except BootstrapError as exc:
+            errors.append(str(exc))
+
+    thread = threading.Thread(
+        target=worker,
+        name=f"ntm-bootstrap-send-{session}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def handle_post_spawn_interaction(
+    *,
+    session: str,
+    project_dir: Path,
+    auto_attach: bool,
+    pane: int | None,
+    template_name: str,
+    plan_abs_path: Path | None,
+    plan_display_name: str,
+) -> bool:
+    if plan_abs_path is None:
+        if auto_attach:
+            attach_session(session, project_dir)
+            return True
+        return False
+
+    if pane is None:
+        raise BootstrapError("prompt pane must be resolved before sending the planning prompt")
+
+    if not auto_attach:
+        send_prompt(
+            session,
+            pane,
+            template_name,
+            plan_abs_path,
+            plan_display_name,
+            project_dir,
+            False,
+        )
+        return False
+
+    if inside_tmux():
+        attach_session(session, project_dir)
+        send_prompt(
+            session,
+            pane,
+            template_name,
+            plan_abs_path,
+            plan_display_name,
+            project_dir,
+            False,
+        )
+        return True
+
+    errors: list[str] = []
+    thread = start_delayed_prompt_send(
+        session,
+        pane,
+        template_name,
+        plan_abs_path,
+        plan_display_name,
+        project_dir,
+        errors,
+    )
+    attach_error: BootstrapError | None = None
+    # Outside tmux, attaching takes over the terminal. Queue prompt delivery with a
+    # short delay so the user lands in the session before the planning prompt arrives.
+    try:
+        attach_session(session, project_dir)
+    except BootstrapError as exc:
+        attach_error = exc
+    thread.join()
+    if attach_error is not None:
+        raise attach_error
+    if errors:
+        raise BootstrapError(errors[0])
+    return True
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ntm-bootstrap",
@@ -869,6 +1004,8 @@ def print_summary(result: BootstrapResult) -> None:
         print(f"Spawned session {result.session!r}")
     elif result.session_reused:
         print(f"Reused session {result.session!r}")
+    if result.session_attached:
+        print(f"Attached to session {result.session!r}")
     if result.plan_file:
         print(f"Sent template {result.prompt_template!r} to pane {result.prompt_pane} using {result.plan_file}")
     for warning in result.warnings:
@@ -894,6 +1031,7 @@ def main() -> int:
     no_user = bool(args.no_user or spawn_cfg.get("no_user", False))
     no_vscode = bool(args.no_vscode or config_data.get("skip_vscode", False))
     no_claude = bool(args.no_claude or config_data.get("skip_claude", False))
+    auto_attach = should_auto_attach(args)
 
     result = BootstrapResult(
         working_directory=str(project_dir),
@@ -954,17 +1092,18 @@ def main() -> int:
         elif not args.no_send:
             raise BootstrapError("cannot send the planning prompt without an existing session when --no-spawn is set")
 
-        if not args.no_send and plan_abs_path is not None:
+        if plan_abs_path is not None:
             result.prompt_pane = args.pane if args.pane is not None else detect_prompt_pane(args.project_name)
-            send_prompt(
-                args.project_name,
-                result.prompt_pane,
-                template_name,
-                plan_abs_path,
-                plan_display_name,
-                project_dir,
-                args.dry_run,
-            )
+
+        result.session_attached = handle_post_spawn_interaction(
+            session=args.project_name,
+            project_dir=project_dir,
+            auto_attach=bool(result.session_spawned and auto_attach),
+            pane=result.prompt_pane,
+            template_name=template_name,
+            plan_abs_path=plan_abs_path,
+            plan_display_name=plan_display_name,
+        )
 
     except BootstrapError as exc:
         if args.json:
