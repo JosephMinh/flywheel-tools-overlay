@@ -3400,6 +3400,10 @@ def command_status(config: Config) -> int:
     env_cache: dict[int, dict[str, str]] = {}
     tree_cache: dict[int, list[int]] = {}
     work_state_cache: dict[str, ProjectWorkState] = {}
+    suppress_decisions = frozenset({
+        POLICY_DECISION_SUPPRESS_NO_OPEN,
+        POLICY_DECISION_SUPPRESS_NO_READY,
+    })
     for key, binding in bindings.items():
         pane = resolve_bound_pane(binding, panes)
         loose_pane = resolve_bound_pane_loose(binding, panes)
@@ -3461,10 +3465,6 @@ def command_status(config: Config) -> int:
         entry["work_state_in_progress_count"] = work_state.in_progress_count
         entry["work_state_error"] = work_state.error
         if config.beads_gate_enabled:
-            suppress_decisions = {
-                POLICY_DECISION_SUPPRESS_NO_OPEN,
-                POLICY_DECISION_SUPPRESS_NO_READY,
-            }
             entry["normal_wake_allowed"] = (
                 beads_gate_decision("normal", work_state)[0] not in suppress_decisions
             )
