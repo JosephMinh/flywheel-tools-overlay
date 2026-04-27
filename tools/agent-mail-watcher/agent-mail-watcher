@@ -3399,6 +3399,7 @@ def command_status(config: Config) -> int:
     binding_statuses: dict[str, Any] = {}
     env_cache: dict[int, dict[str, str]] = {}
     tree_cache: dict[int, list[int]] = {}
+    work_state_cache: dict[str, ProjectWorkState] = {}
     for key, binding in bindings.items():
         pane = resolve_bound_pane(binding, panes)
         loose_pane = resolve_bound_pane_loose(binding, panes)
@@ -3425,6 +3426,17 @@ def command_status(config: Config) -> int:
         elif loose_pane is None:
             prompt_state = "dead"
             state_reason = "no-live-pane"
+        binding_project_key = str(entry.get("project_key") or "").strip()
+        if binding_project_key:
+            work_state = project_work_state_for_target(
+                pane, binding_project_key, work_state_cache
+            )
+        else:
+            work_state = ProjectWorkState.unavailable(
+                repo_root=None,
+                source="canonical-project",
+                error="no-project-key",
+            )
         entry["pane_live"] = pane is not None
         entry["pane_loose_live"] = loose_pane is not None
         entry["alive"] = pane is not None
@@ -3439,6 +3451,15 @@ def command_status(config: Config) -> int:
         entry["resolved_current_path"] = pane.current_path if pane is not None else None
         entry["loose_pane_key"] = loose_pane.composite_key if loose_pane is not None else None
         entry["loose_pane_id"] = loose_pane.pane_id if loose_pane is not None else None
+        entry["work_state_repo_root"] = (
+            str(work_state.repo_root) if work_state.repo_root is not None else None
+        )
+        entry["work_state_source"] = work_state.source
+        entry["work_state_available"] = work_state.available
+        entry["work_state_open_count"] = work_state.open_count
+        entry["work_state_ready_count"] = work_state.ready_count
+        entry["work_state_in_progress_count"] = work_state.in_progress_count
+        entry["work_state_error"] = work_state.error
         binding_statuses[key] = entry
     payload = {
         "config": config.to_json(),
