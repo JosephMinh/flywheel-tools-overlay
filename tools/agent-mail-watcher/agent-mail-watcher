@@ -1984,7 +1984,7 @@ def binding_matches_pane(binding: dict[str, Any] | None, pane: PaneInfo) -> bool
     if expected_pid and pane.pid != expected_pid:
         return False
     project_key = str(binding.get("project_key") or "").strip()
-    if project_key and not path_is_within_project(pane.current_path, project_key):
+    if project_key and not path_matches_project_workspace(pane.current_path, project_key):
         return False
     return binding_metadata_matches_pane(binding, pane)
 
@@ -2044,6 +2044,12 @@ def path_is_within_project(path_value: str, project_key: str) -> bool:
     if path == project:
         return True
     return project in path.parents
+
+
+def path_matches_project_workspace(path_value: str, project_key: str) -> bool:
+    if path_is_within_project(path_value, project_key):
+        return True
+    return same_git_workspace(path_value, project_key)
 
 
 def git_probe_cwd(path_value: str) -> pathlib.Path | None:
@@ -5186,10 +5192,10 @@ def command_self_test(config: Config) -> int:
         raise RuntimeError("self-test status did not report canonical-project fallback")
     if pathlib.Path(str(worktree_fallback_status.get("work_state_repo_root") or "")).resolve() != worktree_canonical.resolve():
         raise RuntimeError("self-test status reported the wrong repo root for canonical fallback")
-    if worktree_fallback_status.get("pane_live") is not False or worktree_fallback_status.get("pane_loose_live") is not True:
-        raise RuntimeError("self-test status did not expose the expected conservative loose-pane fallback state")
-    if worktree_fallback_status.get("resolved_current_path") is not None:
-        raise RuntimeError("self-test status unexpectedly resolved the divergent linked worktree as an owned canonical pane")
+    if worktree_fallback_status.get("pane_live") is not True or worktree_fallback_status.get("pane_loose_live") is not True:
+        raise RuntimeError("self-test status did not keep the divergent linked worktree pane visible during fallback")
+    if worktree_fallback_status.get("resolved_current_path") != str(worktree_linked):
+        raise RuntimeError("self-test status did not preserve the linked worktree current_path during canonical fallback")
     record_self_test_scenario(
         "worktree-fallback-to-canonical",
         "When a linked worktree shares Git history but lacks .beads, fall back conservatively to the canonical project root.",
@@ -5202,9 +5208,9 @@ def command_self_test(config: Config) -> int:
             "work_state_repo_root": str(worktree_canonical.resolve()),
             "open_count": worktree_canonical_counts["open_count"],
             "ready_count": worktree_canonical_counts["ready_count"],
-            "status_pane_live": False,
+            "status_pane_live": True,
             "status_pane_loose_live": True,
-            "status_resolved_current_path": None,
+            "status_resolved_current_path": str(worktree_linked),
         },
         actual={
             "same_git_workspace": True,
@@ -5219,6 +5225,57 @@ def command_self_test(config: Config) -> int:
             "status_pane_loose_live": worktree_fallback_status.get("pane_loose_live"),
             "status_resolved_current_path": worktree_fallback_status.get("resolved_current_path"),
             "status_loose_pane_id": worktree_fallback_status.get("loose_pane_id"),
+        },
+        extra={"project_slug": worktree_project_slug, "agent_name": worktree_agent_name},
+    )
+
+    setup_self_test_beads_repo(worktree_linked)
+    worktree_linked_counts = seed_self_test_beads_state(worktree_linked, "zero-open")
+    worktree_linked_state = project_work_state_for_target(worktree_pane, str(worktree_canonical))
+    if worktree_linked_state.source != "pane-worktree":
+        raise RuntimeError("self-test did not prefer the live pane worktree once it had .beads")
+    if worktree_linked_state.repo_root != worktree_linked.resolve():
+        raise RuntimeError("self-test pane-worktree selection chose the wrong linked repo root")
+    if (
+        worktree_linked_state.open_count != worktree_linked_counts["open_count"]
+        or worktree_linked_state.ready_count != worktree_linked_counts["ready_count"]
+    ):
+        raise RuntimeError("self-test pane-worktree selection did not use linked worktree counts")
+    worktree_linked_status = binding_status_snapshot(str(worktree_canonical), worktree_agent_name)
+    if worktree_linked_status.get("work_state_source") != "pane-worktree":
+        raise RuntimeError("self-test status did not report pane-worktree for the linked repo")
+    if pathlib.Path(str(worktree_linked_status.get("work_state_repo_root") or "")).resolve() != worktree_linked.resolve():
+        raise RuntimeError("self-test status reported the wrong linked repo root")
+    if worktree_linked_status.get("pane_live") is not True:
+        raise RuntimeError("self-test status did not treat the linked worktree pane as live after workspace-aware binding match")
+    if worktree_linked_status.get("resolved_current_path") != str(worktree_linked):
+        raise RuntimeError("self-test status did not surface the linked worktree current_path")
+    record_self_test_scenario(
+        "worktree-prefers-pane-root",
+        "When the live pane checkout is a valid linked worktree with its own beads state, prefer that worktree over the canonical path.",
+        workspaces={"canonical": worktree_canonical, "linked": worktree_linked},
+        pane_ids={"linked_worktree": worktree_pane.pane_id},
+        expected={
+            "same_git_workspace": True,
+            "pane_beads_repo_root": str(worktree_linked.resolve()),
+            "work_state_source": "pane-worktree",
+            "work_state_repo_root": str(worktree_linked.resolve()),
+            "open_count": worktree_linked_counts["open_count"],
+            "ready_count": worktree_linked_counts["ready_count"],
+            "status_pane_live": True,
+            "status_resolved_current_path": str(worktree_linked),
+        },
+        actual={
+            "same_git_workspace": True,
+            "pane_beads_repo_root": str(worktree_linked.resolve()),
+            "work_state_source": worktree_linked_state.source,
+            "work_state_repo_root": str(worktree_linked_state.repo_root),
+            "open_count": worktree_linked_state.open_count,
+            "ready_count": worktree_linked_state.ready_count,
+            "status_work_state_source": worktree_linked_status.get("work_state_source"),
+            "status_work_state_repo_root": worktree_linked_status.get("work_state_repo_root"),
+            "status_pane_live": worktree_linked_status.get("pane_live"),
+            "status_resolved_current_path": worktree_linked_status.get("resolved_current_path"),
         },
         extra={"project_slug": worktree_project_slug, "agent_name": worktree_agent_name},
     )
@@ -5360,6 +5417,14 @@ def command_self_test(config: Config) -> int:
                     "ready_count": worktree_fallback_state.ready_count,
                     "status_pane_live": worktree_fallback_status.get("pane_live"),
                     "status_pane_loose_live": worktree_fallback_status.get("pane_loose_live"),
+                },
+                "worktree_selection_pane_preferred": {
+                    "work_state_source": worktree_linked_state.source,
+                    "work_state_repo_root": str(worktree_linked_state.repo_root),
+                    "open_count": worktree_linked_state.open_count,
+                    "ready_count": worktree_linked_state.ready_count,
+                    "status_pane_live": worktree_linked_status.get("pane_live"),
+                    "status_resolved_current_path": worktree_linked_status.get("resolved_current_path"),
                 },
             },
             indent=2,
