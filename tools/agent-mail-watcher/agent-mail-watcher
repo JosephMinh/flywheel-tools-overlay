@@ -322,12 +322,16 @@ def run_command(
     check: bool = True,
     capture_output: bool = True,
     text: bool = True,
+    cwd: str | pathlib.Path | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         check=check,
         capture_output=capture_output,
         text=text,
+        cwd=cwd,
+        timeout=timeout,
     )
 
 
@@ -407,6 +411,7 @@ class Config:
     create_session_prefix: str
     shell_command: str
     auto_create_missing_panes: bool
+    beads_gate_enabled: bool
     provider_specs: dict[str, ProviderSpec]
 
     @classmethod
@@ -447,6 +452,7 @@ class Config:
             create_session_prefix=str(raw.get("create_session_prefix", "agentmail")),
             shell_command=str(raw.get("shell_command", "zsh -l")),
             auto_create_missing_panes=bool(raw.get("auto_create_missing_panes", False)),
+            beads_gate_enabled=bool(raw.get("beads_gate_enabled", False)),
             provider_specs=provider_specs,
         )
 
@@ -466,6 +472,7 @@ class Config:
             "create_session_prefix": self.create_session_prefix,
             "shell_command": self.shell_command,
             "auto_create_missing_panes": self.auto_create_missing_panes,
+            "beads_gate_enabled": self.beads_gate_enabled,
             "providers": {
                 program: {
                     "active_commands": list(spec.active_commands),
@@ -551,6 +558,43 @@ class NTMRegistry:
     registered_at: str
     updated_at: str
     path: pathlib.Path
+
+
+@dataclass
+class ProjectWorkState:
+    repo_root: pathlib.Path | None
+    source: str
+    available: bool
+    open_count: int | None = None
+    ready_count: int | None = None
+    in_progress_count: int | None = None
+    error: str | None = None
+
+    @classmethod
+    def unavailable(
+        cls,
+        *,
+        repo_root: pathlib.Path | None,
+        source: str,
+        error: str,
+    ) -> "ProjectWorkState":
+        return cls(
+            repo_root=repo_root,
+            source=source,
+            available=False,
+            error=error,
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "repo_root": str(self.repo_root) if self.repo_root is not None else None,
+            "source": self.source,
+            "available": self.available,
+            "open_count": self.open_count,
+            "ready_count": self.ready_count,
+            "in_progress_count": self.in_progress_count,
+            "error": self.error,
+        }
 
 
 def list_tmux_panes() -> list[PaneInfo]:
@@ -1978,6 +2022,200 @@ def path_is_within_project(path_value: str, project_key: str) -> bool:
     return project in path.parents
 
 
+def git_probe_cwd(path_value: str) -> pathlib.Path | None:
+    try:
+        path = pathlib.Path(path_value).resolve()
+    except OSError:
+        return None
+    if path.is_dir():
+        return path
+    return path.parent if path.parent.exists() else None
+
+
+def resolve_git_output_path(raw_value: str, *, cwd: pathlib.Path) -> pathlib.Path | None:
+    candidate = raw_value.strip()
+    if not candidate:
+        return None
+    path = pathlib.Path(candidate)
+    if not path.is_absolute():
+        path = (cwd / path).resolve()
+    else:
+        path = path.resolve()
+    return path
+
+
+def git_repo_root(path_value: str) -> pathlib.Path | None:
+    cwd = git_probe_cwd(path_value)
+    if cwd is None:
+        return None
+    try:
+        result = run_command(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            timeout=2.0,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    return resolve_git_output_path(result.stdout, cwd=cwd)
+
+
+def git_common_dir(path_value: str) -> pathlib.Path | None:
+    cwd = git_probe_cwd(path_value)
+    if cwd is None:
+        return None
+    try:
+        result = run_command(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=cwd,
+            timeout=2.0,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    return resolve_git_output_path(result.stdout, cwd=cwd)
+
+
+def same_git_workspace(path_a: str, path_b: str) -> bool:
+    common_a = git_common_dir(path_a)
+    common_b = git_common_dir(path_b)
+    if common_a is None or common_b is None:
+        return False
+    return common_a == common_b
+
+
+def find_beads_repo_root(path_value: str) -> pathlib.Path | None:
+    repo_root = git_repo_root(path_value)
+    if repo_root is None:
+        return None
+    if not (repo_root / ".beads").is_dir():
+        return None
+    return repo_root
+
+
+def project_work_state_for_repo_root(
+    repo_root: str | pathlib.Path,
+    cache: dict[str, ProjectWorkState] | None = None,
+) -> ProjectWorkState:
+    resolved_root = pathlib.Path(repo_root).resolve()
+    cache_key = str(resolved_root)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    if not (resolved_root / ".beads").is_dir():
+        state = ProjectWorkState.unavailable(
+            repo_root=resolved_root,
+            source="observer-mode-br",
+            error="beads-repo-not-found",
+        )
+    else:
+        try:
+            result = run_command(
+                [
+                    "br",
+                    "--json",
+                    "--no-auto-flush",
+                    "--no-auto-import",
+                    "--lock-timeout",
+                    "250",
+                    "stats",
+                ],
+                check=False,
+                cwd=resolved_root,
+                timeout=5.0,
+            )
+        except FileNotFoundError:
+            state = ProjectWorkState.unavailable(
+                repo_root=resolved_root,
+                source="observer-mode-br",
+                error="br-not-installed",
+            )
+        except subprocess.TimeoutExpired:
+            state = ProjectWorkState.unavailable(
+                repo_root=resolved_root,
+                source="observer-mode-br",
+                error="br-stats-timeout",
+            )
+        except OSError as exc:
+            state = ProjectWorkState.unavailable(
+                repo_root=resolved_root,
+                source="observer-mode-br",
+                error=str(exc),
+            )
+        else:
+            try:
+                payload = json.loads(result.stdout or "{}")
+            except json.JSONDecodeError:
+                state = ProjectWorkState.unavailable(
+                    repo_root=resolved_root,
+                    source="observer-mode-br",
+                    error="br-stats-invalid-json",
+                )
+            else:
+                summary = payload.get("summary") if isinstance(payload, dict) else None
+                if isinstance(summary, dict):
+                    state = ProjectWorkState(
+                        repo_root=resolved_root,
+                        source="observer-mode-br",
+                        available=True,
+                        open_count=max(0, parse_int(summary.get("open_issues", 0), 0)),
+                        ready_count=max(0, parse_int(summary.get("ready_issues", 0), 0)),
+                        in_progress_count=max(0, parse_int(summary.get("in_progress_issues", 0), 0)),
+                    )
+                else:
+                    error_payload = payload.get("error") if isinstance(payload, dict) else None
+                    if isinstance(error_payload, dict):
+                        error_code = str(error_payload.get("code") or "BR_ERROR")
+                        error_message = str(error_payload.get("message") or "unknown br error")
+                        error_text = f"{error_code}: {error_message}"
+                    elif result.returncode != 0 and result.stderr.strip():
+                        error_text = result.stderr.strip()
+                    else:
+                        error_text = "br-stats-missing-summary"
+                    state = ProjectWorkState.unavailable(
+                        repo_root=resolved_root,
+                        source="observer-mode-br",
+                        error=error_text,
+                    )
+    if cache is not None:
+        cache[cache_key] = state
+    return state
+
+
+def project_work_state_for_target(
+    pane: PaneInfo | None,
+    project_key: str,
+    cache: dict[str, ProjectWorkState] | None = None,
+) -> ProjectWorkState:
+    if pane is not None and pane.current_path and same_git_workspace(pane.current_path, project_key):
+        pane_repo_root = find_beads_repo_root(pane.current_path)
+        if pane_repo_root is not None:
+            state = project_work_state_for_repo_root(pane_repo_root, cache)
+            return ProjectWorkState(
+                repo_root=state.repo_root,
+                source="pane-worktree",
+                available=state.available,
+                open_count=state.open_count,
+                ready_count=state.ready_count,
+                in_progress_count=state.in_progress_count,
+                error=state.error,
+            )
+    canonical_repo_root = find_beads_repo_root(project_key)
+    if canonical_repo_root is not None:
+        state = project_work_state_for_repo_root(canonical_repo_root, cache)
+        return ProjectWorkState(
+            repo_root=state.repo_root,
+            source="canonical-project",
+            available=state.available,
+            open_count=state.open_count,
+            ready_count=state.ready_count,
+            in_progress_count=state.in_progress_count,
+            error=state.error,
+        )
+    return ProjectWorkState.unavailable(
+        repo_root=git_repo_root(project_key),
+        source="canonical-project",
+        error="beads-repo-not-found",
+    )
+
+
 def pane_has_shadow_session_name(config: Config, pane: PaneInfo) -> bool:
     return pane.session_name.startswith(f"{config.create_session_prefix}-")
 
@@ -3259,6 +3497,7 @@ def command_self_test(config: Config) -> int:
         create_session_prefix=f"amst-{stamp.lower()}",
         shell_command=config.shell_command,
         auto_create_missing_panes=True,
+        beads_gate_enabled=config.beads_gate_enabled,
         provider_specs=dict(config.provider_specs),
     )
     write_json_atomic(test_config.config_path, test_config.to_json())

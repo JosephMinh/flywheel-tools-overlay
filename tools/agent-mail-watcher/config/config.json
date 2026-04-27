@@ -1,6 +1,7 @@
 {
   "bindings_path": "/home/ubuntu/.config/agent-mail-watcher/bindings.json",
   "auto_create_missing_panes": false,
+  "beads_gate_enabled": false,
   "create_session_prefix": "agentmail",
   "deferred_retry_seconds": 2.0,
   "max_retry_attempts": 5,
