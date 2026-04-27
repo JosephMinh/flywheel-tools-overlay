@@ -101,6 +101,63 @@ The gate is rolled out behind a flag so the live watcher can be deployed first, 
 
 Once those look correct on a machine, set `beads_gate_enabled: true` in that machine's `config.json` and restart the user service.
 
+### State sourcing
+
+The beads-gate policy needs each project's open and ready bead counts. Two rules govern how the watcher reads them.
+
+**Source of truth: `br stats --json` in observer mode**
+
+The watcher invokes:
+
+```
+br --json --no-auto-flush --no-auto-import --lock-timeout 250 stats
+```
+
+- `--no-auto-flush` and `--no-auto-import` keep the watcher read-only; it must not mutate the bead graph or contend with agent writes during a scan.
+- `--lock-timeout 250` keeps scans cheap; a busy DB returns a timeout that the watcher treats as unavailable.
+- The watcher never parses `.beads/issues.jsonl` directly. Counts come only from the `summary` block of `br stats`, so the gate respects whatever the daemon currently believes.
+
+**Pane-checkout preference, canonical fallback**
+
+When a wake target is resolved, the watcher prefers the pane's own working directory as the work-state source — but only when it can prove the pane is in the same Git workspace as the project's canonical path (verified via `git rev-parse --show-toplevel` and `git rev-parse --git-common-dir`). This matters for divergent worktrees: a pane on a feature branch worktree may have different open beads than the canonical `main` checkout.
+
+Only when the pane checkout cannot be proven to belong to the same workspace does the watcher fall back to the canonical `project_key`. If neither resolves to a beads repo, the work state is reported as unavailable.
+
+The status output exposes the resolved choice on each binding:
+
+- `work_state_source: "pane-worktree"` — pane checkout used.
+- `work_state_source: "canonical-project"` — fell back to canonical path.
+
+**Per-run cache**
+
+One scan or status run can inspect many bindings. The watcher memoizes work-state lookups keyed by repo root within the run, caching both successful and unavailable reads, so duplicate bindings in the same project never spawn a second `br` invocation in the same pass.
+
+### Suppression semantics
+
+When the gate suppresses a wake, the suppression is **terminal**. It is logged once, the signal is marked delivered, and the watcher does not retry. There is no exponential backoff for policy decisions; the signal moves on.
+
+Suppression actions that appear in `events.jsonl`:
+
+- `suppressed-no-open-beads` — project has zero open beads; only `urgent` would have woken.
+- `suppressed-no-ready-beads` — project has open beads but zero ready (everything is blocked); only `high` and `urgent` would have woken.
+
+Skip actions used when no policy was applied at all:
+
+- `skip-policy-disabled` — `beads_gate_enabled` was `false` at scan time; the policy did not run.
+- `skip-policy-unavailable` — `br` could not return counts; the policy chose to fail open and the existing wake path runs unchanged.
+
+**Fail-open on uncertainty**
+
+Whenever the watcher cannot trust the counts, the gate must not suppress. The conditions that fail open:
+
+- `br` is missing or returned a non-zero exit code.
+- `br stats` returned without a `summary` block.
+- The DB was locked and the 250 ms lock-timeout expired.
+- The pane checkout could not be proven against the canonical project and there was no canonical beads repo either.
+- The bead graph response was not parseable JSON.
+
+In every fail-open case, `work_state_available` is `false`, `work_state_error` carries the underlying reason, `beads_gate_explanation` reads `work state unavailable (<error>) — failing open, all wakes proceed`, and the existing wake path runs as if the gate were disabled. The watcher must never lose a wake because of a transient `br` problem.
+
 ## Retry And Log Caps
 
 - An undelivered signal gets one initial processing attempt plus at most `5` retries.
