@@ -56,6 +56,51 @@ This watcher is the user-level wakeup bridge for Agent Mail. It must work withou
   - a leftover legacy `CODEX_THREAD_ID` on a single pane after the global scrub fix was installed
 - If that issue is found while the pane is idle, the watcher should repair it by respawning the pane with its existing launcher command before later wake delivery.
 
+## Beads Gate
+
+The watcher can also suppress non-urgent wakes when the target project has no actionable bead work. This is feature-gated behind a single config flag and only applies on top of the rules above; busy suppression, ownership checks, and provider-identity checks all run first.
+
+### `beads_gate_enabled`
+
+Boolean in `config.json`. Defaults to `false` for staged rollout.
+
+- `false`: legacy behavior. Every wake follows the existing pre-v2 path; bead state is not consulted.
+- `true`: the watcher reads bead counts from `br stats --json` (read-only observer mode) for each target pane's project and applies the policy below before delivering a wake.
+
+### Wake policy matrix
+
+| Project state                              | low  | normal | high | urgent |
+| ------------------------------------------ | ---- | ------ | ---- | ------ |
+| ready (open ≥ 1, ready ≥ 1)                | wake | wake   | wake | wake   |
+| open but zero ready (open ≥ 1, ready = 0)  | drop | drop   | wake | wake   |
+| zero open (open = 0)                       | drop | drop   | drop | wake   |
+| unavailable (br read failed, locked, etc.) | wake | wake   | wake | wake   |
+| disabled (`beads_gate_enabled=false`)      | wake | wake   | wake | wake   |
+
+- `wake` runs the existing wake path. `drop` logs `suppressed-no-open-beads` or `suppressed-no-ready-beads` and treats the signal as delivered (no retry, no auto-create).
+- `high` does NOT break through when there are zero open beads — only `urgent` does. An empty backlog means there is nothing for the agent to act on, even with a high-importance ping.
+- Unavailable bead state always falls back to wake. Suppression on uncertainty is never correct: operators must not lose wakes because `br` was briefly busy or the repo was misclassified.
+
+### Worked examples
+
+- A project with `open=8, ready=3` receives a `normal` wake → delivered.
+- A project with `open=8, ready=0` receives a `normal` wake → suppressed (`suppressed-no-ready-beads`).
+- A project with `open=8, ready=0` receives a `high` wake → delivered.
+- A project with `open=0, ready=0` receives a `high` wake → suppressed (`suppressed-no-open-beads`).
+- A project with `open=0, ready=0` receives an `urgent` wake → delivered.
+- The watcher cannot find a beads repo for the resolved project → wake delivered (fail-open).
+
+### Why the default is `false`
+
+The gate is rolled out behind a flag so the live watcher can be deployed first, then the policy can be enabled per-machine after the operator confirms the new fields in `agent-mail-watcher status` output match expectations for that machine's projects:
+
+- `work_state_repo_root`, `work_state_source`, `work_state_available`
+- `work_state_open_count`, `work_state_ready_count`, `work_state_in_progress_count`
+- `normal_wake_allowed`, `high_wake_allowed`, `urgent_wake_allowed`
+- `beads_gate_explanation` (concise human-readable summary of the active state)
+
+Once those look correct on a machine, set `beads_gate_enabled: true` in that machine's `config.json` and restart the user service.
+
 ## Retry And Log Caps
 
 - An undelivered signal gets one initial processing attempt plus at most `5` retries.
