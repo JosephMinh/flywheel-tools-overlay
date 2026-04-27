@@ -3645,6 +3645,35 @@ def seed_self_test_beads_state(
     return counts
 
 
+SELF_TEST_BEADS_UNAVAILABLE_SCENARIOS = ("no-beads-dir",)
+SELF_TEST_BEADS_UNAVAILABLE_EXPECTED_ERROR: dict[str, str] = {
+    "no-beads-dir": "beads-repo-not-found",
+}
+
+
+def setup_self_test_unavailable_workspace(
+    workspace: pathlib.Path,
+    *,
+    scenario: str = "no-beads-dir",
+) -> pathlib.Path:
+    if scenario not in SELF_TEST_BEADS_UNAVAILABLE_SCENARIOS:
+        raise ValueError(
+            f"unknown unavailable scenario {scenario!r}; "
+            f"expected one of {SELF_TEST_BEADS_UNAVAILABLE_SCENARIOS}"
+        )
+    workspace.mkdir(parents=True, exist_ok=True)
+    if not (workspace / ".git").is_dir():
+        run_command(["git", "init", "-q"], cwd=workspace)
+    # Intentionally do NOT run `br init` for "no-beads-dir": the absence of
+    # `.beads/` at the resolved Git root is what makes find_beads_repo_root
+    # return None, which maps to ProjectWorkState.unavailable(error=
+    # "beads-repo-not-found") in project_work_state_for_target. That state
+    # then drives beads_gate_decision to POLICY_DECISION_SKIP_UNAVAILABLE,
+    # exercising the watcher's fail-open path without depending on PATH
+    # manipulation, lock contention, or other fragile global state.
+    return workspace
+
+
 def create_self_test_pane(
     *,
     session_name: str,
