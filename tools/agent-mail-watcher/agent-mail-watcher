@@ -3841,7 +3841,7 @@ def setup_self_test_project(
 
 def setup_self_test_beads_repo(workspace: pathlib.Path) -> pathlib.Path:
     workspace.mkdir(parents=True, exist_ok=True)
-    if not (workspace / ".git").is_dir():
+    if not (workspace / ".git").exists():
         run_command(["git", "init", "-q"], cwd=workspace)
     if not (workspace / ".beads").is_dir():
         run_command(["br", "init"], cwd=workspace)
@@ -3854,6 +3854,8 @@ SELF_TEST_BEADS_EXPECTED_COUNTS: dict[str, dict[str, int]] = {
     "open-zero-ready": {"open_count": 1, "ready_count": 0},
     "ready": {"open_count": 1, "ready_count": 1},
 }
+SELF_TEST_GIT_AUTHOR_NAME = "Agent Mail Watcher Self Test"
+SELF_TEST_GIT_AUTHOR_EMAIL = "agent-mail-watcher-self-test@example.invalid"
 
 
 def seed_self_test_beads_state(
@@ -3931,7 +3933,7 @@ def setup_self_test_unavailable_workspace(
             f"expected one of {SELF_TEST_BEADS_UNAVAILABLE_SCENARIOS}"
         )
     workspace.mkdir(parents=True, exist_ok=True)
-    if not (workspace / ".git").is_dir():
+    if not (workspace / ".git").exists():
         run_command(["git", "init", "-q"], cwd=workspace)
     # Intentionally do NOT run `br init` for "no-beads-dir": the absence of
     # `.beads/` at the resolved Git root is what makes find_beads_repo_root
@@ -3941,6 +3943,46 @@ def setup_self_test_unavailable_workspace(
     # exercising the watcher's fail-open path without depending on PATH
     # manipulation, lock contention, or other fragile global state.
     return workspace
+
+
+def ensure_self_test_git_head(workspace: pathlib.Path) -> None:
+    result = run_command(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=workspace,
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+    run_command(
+        [
+            "git",
+            "-c",
+            f"user.name={SELF_TEST_GIT_AUTHOR_NAME}",
+            "-c",
+            f"user.email={SELF_TEST_GIT_AUTHOR_EMAIL}",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "self-test base commit",
+        ],
+        cwd=workspace,
+    )
+
+
+def setup_self_test_linked_worktree(
+    primary_workspace: pathlib.Path,
+    linked_workspace: pathlib.Path,
+) -> pathlib.Path:
+    linked_workspace = linked_workspace.resolve()
+    if (linked_workspace / ".git").exists():
+        return linked_workspace
+    ensure_parent(linked_workspace / ".git")
+    ensure_self_test_git_head(primary_workspace)
+    run_command(
+        ["git", "worktree", "add", "-q", "--detach", str(linked_workspace), "HEAD"],
+        cwd=primary_workspace,
+    )
+    return linked_workspace
 
 
 def create_self_test_pane(
@@ -4125,6 +4167,18 @@ def command_self_test(config: Config) -> int:
             events=events,
             extra=extra,
         )
+
+    def binding_status_snapshot(project_key: str, agent_name: str) -> dict[str, Any]:
+        status_payload = watcher_status_command_outcome(test_config).get("stdout_json") or {}
+        binding_statuses = status_payload.get("binding_statuses")
+        if not isinstance(binding_statuses, dict):
+            raise RuntimeError("self-test status payload did not expose binding_statuses")
+        status_entry = binding_statuses.get(binding_key(project_key, agent_name))
+        if not isinstance(status_entry, dict):
+            raise RuntimeError(
+                f"self-test status payload missing binding status for {project_key}:{agent_name}"
+            )
+        return status_entry
 
     signal_path = signals_dir / "projects" / project_slug / "agents" / f"{agent_name}.signal"
     signal_path_alt = signals_dir / "projects" / project_slug_alt / "agents" / f"{agent_name}.signal"
@@ -5085,6 +5139,90 @@ def command_self_test(config: Config) -> int:
         extra={"project_slug": project_slug, "agent_name": shared_native_agent_name},
     )
 
+    worktree_project_slug = "watcher-selftest-worktree"
+    worktree_agent_name = "WorktreeDivergenceTester"
+    worktree_canonical = root / "workspace-worktree-canonical"
+    worktree_linked = root / "workspace-worktree-linked"
+    worktree_session_name = f"worktree-divergence-{stamp.lower()}"[:48]
+    setup_self_test_beads_repo(worktree_canonical)
+    worktree_canonical_counts = seed_self_test_beads_state(worktree_canonical, "ready")
+    setup_self_test_linked_worktree(worktree_canonical, worktree_linked)
+    setup_self_test_project(
+        mailbox_root=mailbox_root,
+        project_slug=worktree_project_slug,
+        project_key=str(worktree_canonical),
+        agent_name=worktree_agent_name,
+        program="wake-test",
+    )
+    worktree_pane = create_self_test_pane(
+        session_name=worktree_session_name,
+        workspace=worktree_linked,
+        shell_command=test_config.shell_command,
+    )
+    save_binding(
+        test_config,
+        project_key=str(worktree_canonical),
+        agent_name=worktree_agent_name,
+        pane=worktree_pane,
+        program="wake-test",
+        session_id=None,
+    )
+    if not same_git_workspace(str(worktree_linked), str(worktree_canonical)):
+        raise RuntimeError("self-test linked worktree did not resolve to the same Git workspace")
+    if find_beads_repo_root(str(worktree_linked)) is not None:
+        raise RuntimeError("self-test linked worktree unexpectedly had .beads before fallback validation")
+    worktree_fallback_state = project_work_state_for_target(worktree_pane, str(worktree_canonical))
+    if worktree_fallback_state.source != "canonical-project":
+        raise RuntimeError("self-test did not conservatively fall back to the canonical repo root")
+    if worktree_fallback_state.repo_root != worktree_canonical.resolve():
+        raise RuntimeError("self-test fallback chose the wrong canonical repo root")
+    if (
+        worktree_fallback_state.open_count != worktree_canonical_counts["open_count"]
+        or worktree_fallback_state.ready_count != worktree_canonical_counts["ready_count"]
+    ):
+        raise RuntimeError("self-test canonical fallback did not reuse the canonical repo counts")
+    worktree_fallback_status = binding_status_snapshot(str(worktree_canonical), worktree_agent_name)
+    if worktree_fallback_status.get("work_state_source") != "canonical-project":
+        raise RuntimeError("self-test status did not report canonical-project fallback")
+    if pathlib.Path(str(worktree_fallback_status.get("work_state_repo_root") or "")).resolve() != worktree_canonical.resolve():
+        raise RuntimeError("self-test status reported the wrong repo root for canonical fallback")
+    if worktree_fallback_status.get("pane_live") is not False or worktree_fallback_status.get("pane_loose_live") is not True:
+        raise RuntimeError("self-test status did not expose the expected conservative loose-pane fallback state")
+    if worktree_fallback_status.get("resolved_current_path") is not None:
+        raise RuntimeError("self-test status unexpectedly resolved the divergent linked worktree as an owned canonical pane")
+    record_self_test_scenario(
+        "worktree-fallback-to-canonical",
+        "When a linked worktree shares Git history but lacks .beads, fall back conservatively to the canonical project root.",
+        workspaces={"canonical": worktree_canonical, "linked": worktree_linked},
+        pane_ids={"linked_worktree": worktree_pane.pane_id},
+        expected={
+            "same_git_workspace": True,
+            "pane_beads_repo_root": None,
+            "work_state_source": "canonical-project",
+            "work_state_repo_root": str(worktree_canonical.resolve()),
+            "open_count": worktree_canonical_counts["open_count"],
+            "ready_count": worktree_canonical_counts["ready_count"],
+            "status_pane_live": False,
+            "status_pane_loose_live": True,
+            "status_resolved_current_path": None,
+        },
+        actual={
+            "same_git_workspace": True,
+            "pane_beads_repo_root": None,
+            "work_state_source": worktree_fallback_state.source,
+            "work_state_repo_root": str(worktree_fallback_state.repo_root),
+            "open_count": worktree_fallback_state.open_count,
+            "ready_count": worktree_fallback_state.ready_count,
+            "status_work_state_source": worktree_fallback_status.get("work_state_source"),
+            "status_work_state_repo_root": worktree_fallback_status.get("work_state_repo_root"),
+            "status_pane_live": worktree_fallback_status.get("pane_live"),
+            "status_pane_loose_live": worktree_fallback_status.get("pane_loose_live"),
+            "status_resolved_current_path": worktree_fallback_status.get("resolved_current_path"),
+            "status_loose_pane_id": worktree_fallback_status.get("loose_pane_id"),
+        },
+        extra={"project_slug": worktree_project_slug, "agent_name": worktree_agent_name},
+    )
+
     auto_create_agent_name = "AutoCreateTester"
     setup_self_test_project(
         mailbox_root=mailbox_root,
@@ -5215,6 +5353,14 @@ def command_self_test(config: Config) -> int:
                 "events_shared_native_scrub": shared_native_events,
                 "events_auto_create": auto_create_events,
                 "events_auto_create_repeat": auto_create_repeat_events,
+                "worktree_selection_fallback": {
+                    "work_state_source": worktree_fallback_state.source,
+                    "work_state_repo_root": str(worktree_fallback_state.repo_root),
+                    "open_count": worktree_fallback_state.open_count,
+                    "ready_count": worktree_fallback_state.ready_count,
+                    "status_pane_live": worktree_fallback_status.get("pane_live"),
+                    "status_pane_loose_live": worktree_fallback_status.get("pane_loose_live"),
+                },
             },
             indent=2,
             sort_keys=True,
