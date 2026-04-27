@@ -68,6 +68,12 @@ AWAITING_INPUT_MARKERS = (
 )
 PROMPT_CONSUMPTION_STATES = {"working", "awaiting_input"}
 WAKE_TOKEN_PREFIX = "[agent-mail-wake:"
+NORMALIZED_IMPORTANCE_VALUES = ("low", "normal", "high", "urgent")
+POLICY_DECISION_WAKE = "wake"
+POLICY_DECISION_SKIP_DISABLED = "skip-policy-disabled"
+POLICY_DECISION_SUPPRESS_NO_OPEN = "suppress-no-open-beads"
+POLICY_DECISION_SUPPRESS_NO_READY = "suppress-no-ready-beads"
+POLICY_DECISION_SKIP_UNAVAILABLE = "skip-policy-unavailable"
 PANE_OPTION_AGENT_NAME = "@agent_mail_agent_name"
 PANE_OPTION_PROJECT_KEY = "@agent_mail_project_key"
 PANE_OPTION_PROJECT_HASH = "@agent_mail_project_hash"
@@ -595,6 +601,17 @@ class ProjectWorkState:
             "in_progress_count": self.in_progress_count,
             "error": self.error,
         }
+
+    def with_source(self, source: str) -> "ProjectWorkState":
+        return ProjectWorkState(
+            repo_root=self.repo_root,
+            source=source,
+            available=self.available,
+            open_count=self.open_count,
+            ready_count=self.ready_count,
+            in_progress_count=self.in_progress_count,
+            error=self.error,
+        )
 
 
 def list_tmux_panes() -> list[PaneInfo]:
@@ -1822,6 +1839,13 @@ def build_wake_token(
     return f"{WAKE_TOKEN_PREFIX}{agent_name}:{message_id}]"
 
 
+def normalize_importance(message: dict[str, Any] | None) -> str:
+    raw_value = str((message or {}).get("importance") or "").strip().lower()
+    if raw_value in NORMALIZED_IMPORTANCE_VALUES:
+        return raw_value
+    return "normal"
+
+
 def build_prompt(
     config: Config,
     *,
@@ -1837,7 +1861,7 @@ def build_prompt(
         project_slug=signal_payload.get("project", ""),
         sender=message.get("from") or "unknown sender",
         subject=message.get("subject") or "new message",
-        importance=message.get("importance") or "normal",
+        importance=normalize_importance(message),
         message_id=message.get("id") or "unknown",
         pane_id=pane.pane_id,
         pane_key=pane.composite_key,
@@ -2097,6 +2121,8 @@ def project_work_state_for_repo_root(
 ) -> ProjectWorkState:
     resolved_root = pathlib.Path(repo_root).resolve()
     cache_key = str(resolved_root)
+    # Cache both successful and unavailable reads so one scan/status run does not
+    # repeatedly spawn `br` for the same repo root.
     if cache is not None and cache_key in cache:
         return cache[cache_key]
     if not (resolved_root / ".beads").is_dir():
@@ -2187,33 +2213,54 @@ def project_work_state_for_target(
     if pane is not None and pane.current_path and same_git_workspace(pane.current_path, project_key):
         pane_repo_root = find_beads_repo_root(pane.current_path)
         if pane_repo_root is not None:
-            state = project_work_state_for_repo_root(pane_repo_root, cache)
-            return ProjectWorkState(
-                repo_root=state.repo_root,
-                source="pane-worktree",
-                available=state.available,
-                open_count=state.open_count,
-                ready_count=state.ready_count,
-                in_progress_count=state.in_progress_count,
-                error=state.error,
-            )
+            return project_work_state_for_repo_root(pane_repo_root, cache).with_source("pane-worktree")
     canonical_repo_root = find_beads_repo_root(project_key)
     if canonical_repo_root is not None:
-        state = project_work_state_for_repo_root(canonical_repo_root, cache)
-        return ProjectWorkState(
-            repo_root=state.repo_root,
-            source="canonical-project",
-            available=state.available,
-            open_count=state.open_count,
-            ready_count=state.ready_count,
-            in_progress_count=state.in_progress_count,
-            error=state.error,
-        )
+        return project_work_state_for_repo_root(canonical_repo_root, cache).with_source("canonical-project")
     return ProjectWorkState.unavailable(
         repo_root=git_repo_root(project_key),
         source="canonical-project",
         error="beads-repo-not-found",
     )
+
+
+def beads_gate_decision(importance: str, work_state: ProjectWorkState) -> tuple[str, str | None]:
+    normalized_importance = normalize_importance({"importance": importance})
+    if not work_state.available:
+        return POLICY_DECISION_SKIP_UNAVAILABLE, "work-state-unavailable"
+    open_count = work_state.open_count or 0
+    ready_count = work_state.ready_count or 0
+    if open_count == 0:
+        if normalized_importance == "urgent":
+            return POLICY_DECISION_WAKE, None
+        return POLICY_DECISION_SUPPRESS_NO_OPEN, "no-open-beads"
+    if ready_count == 0:
+        if normalized_importance in {"high", "urgent"}:
+            return POLICY_DECISION_WAKE, None
+        return POLICY_DECISION_SUPPRESS_NO_READY, "no-ready-beads"
+    return POLICY_DECISION_WAKE, None
+
+
+def work_state_event_fields(work_state: ProjectWorkState | None) -> dict[str, Any]:
+    if work_state is None:
+        return {
+            "work_state_repo_root": None,
+            "work_state_source": None,
+            "work_state_available": None,
+            "work_state_open_count": None,
+            "work_state_ready_count": None,
+            "work_state_in_progress_count": None,
+            "work_state_error": None,
+        }
+    return {
+        "work_state_repo_root": str(work_state.repo_root) if work_state.repo_root is not None else None,
+        "work_state_source": work_state.source,
+        "work_state_available": work_state.available,
+        "work_state_open_count": work_state.open_count,
+        "work_state_ready_count": work_state.ready_count,
+        "work_state_in_progress_count": work_state.in_progress_count,
+        "work_state_error": work_state.error,
+    }
 
 
 def pane_has_shadow_session_name(config: Config, pane: PaneInfo) -> bool:
@@ -2715,6 +2762,7 @@ def process_signal(
     *,
     signal_path: pathlib.Path,
     signal_payload: dict[str, Any],
+    work_state_cache: dict[str, ProjectWorkState] | None = None,
 ) -> dict[str, Any]:
     project_slug = str(signal_payload.get("project") or "")
     agent_name = str(signal_payload.get("agent") or "")
@@ -2777,7 +2825,58 @@ def process_signal(
             env_cache=env_cache,
             tree_cache=tree_cache,
         )
+    message = signal_payload.get("message") or {}
+    message_importance = normalize_importance(message)
+    beads_gate_enabled = config.beads_gate_enabled
+    if beads_gate_enabled:
+        work_state = project_work_state_for_target(pane, project_key, cache=work_state_cache)
+        beads_gate_action, beads_gate_reason = beads_gate_decision(message_importance, work_state)
+    else:
+        work_state = None
+        beads_gate_action, beads_gate_reason = (
+            POLICY_DECISION_SKIP_DISABLED,
+            "feature-flag-disabled",
+        )
+    event_work_state = work_state_event_fields(work_state)
     created_new_pane = False
+    if beads_gate_action in {
+        POLICY_DECISION_SUPPRESS_NO_OPEN,
+        POLICY_DECISION_SUPPRESS_NO_READY,
+    }:
+        event = {
+            "timestamp": iso_utc_now(),
+            "action": beads_gate_action,
+            "created_new_pane": False,
+            "selection_source": selection_source,
+            "project_slug": project_slug,
+            "project_key": project_key,
+            "agent_name": agent_name,
+            "program": program,
+            "session_id": session_id,
+            "session_id_source": session_id_source,
+            "pane_key": pane.composite_key if pane is not None else None,
+            "pane_id": pane.pane_id if pane is not None else None,
+            "pane_command": pane.current_command if pane is not None else None,
+            "pane_title": pane.title if pane is not None else None,
+            "message": message,
+            "signal_path": str(signal_path),
+            "delivered": True,
+            "deferred_reason": beads_gate_reason,
+            "prompt_state": None,
+            "state_reason": None,
+            "state_samples": None,
+            "delivery_verification": None,
+            "binding_stale_reason": stale_binding_reason,
+            "ownership_conflict_reason": provider_identity_issue,
+            "provider_identity_issue_reason": provider_identity_issue,
+            "message_importance": message_importance,
+            "beads_gate_enabled": beads_gate_enabled,
+            "beads_gate_decision": beads_gate_action,
+            "beads_gate_reason": beads_gate_reason,
+            **event_work_state,
+        }
+        log_event(config, event)
+        return event
     if pane is None:
         if should_auto_create_pane(
             config,
@@ -2807,7 +2906,7 @@ def process_signal(
                 "pane_id": None,
                 "pane_command": None,
                 "pane_title": None,
-                "message": signal_payload.get("message") or {},
+                "message": message,
                 "signal_path": str(signal_path),
                 "delivered": False,
                 "deferred_reason": deferred_reason,
@@ -2816,6 +2915,13 @@ def process_signal(
                 "state_samples": None,
                 "delivery_verification": None,
                 "binding_stale_reason": stale_binding_reason,
+                "ownership_conflict_reason": provider_identity_issue,
+                "provider_identity_issue_reason": provider_identity_issue,
+                "message_importance": message_importance,
+                "beads_gate_enabled": beads_gate_enabled,
+                "beads_gate_decision": beads_gate_action,
+                "beads_gate_reason": beads_gate_reason,
+                **event_work_state,
             }
             log_event(config, event)
             return event
@@ -2906,7 +3012,7 @@ def process_signal(
         "pane_id": pane.pane_id,
         "pane_command": pane.current_command,
         "pane_title": pane.title,
-        "message": signal_payload.get("message") or {},
+        "message": message,
         "signal_path": str(signal_path),
         "delivered": delivered,
         "deferred_reason": deferred_reason,
@@ -2917,6 +3023,11 @@ def process_signal(
         "binding_stale_reason": stale_binding_reason,
         "ownership_conflict_reason": provider_identity_issue,
         "provider_identity_issue_reason": provider_identity_issue,
+        "message_importance": message_importance,
+        "beads_gate_enabled": beads_gate_enabled,
+        "beads_gate_decision": beads_gate_action,
+        "beads_gate_reason": beads_gate_reason,
+        **event_work_state,
     }
     log_event(config, event)
     return event
@@ -2961,6 +3072,7 @@ def scan_once(config: Config) -> list[dict[str, Any]]:
                 signals_state.pop(stale_path, None)
 
         events: list[dict[str, Any]] = []
+        work_state_cache: dict[str, ProjectWorkState] = {}
         for signal_path in iter_signal_paths(config):
             path_key = str(signal_path)
             previous = signals_state.get(path_key, {})
@@ -3007,7 +3119,12 @@ def scan_once(config: Config) -> list[dict[str, Any]]:
             if same_signature and not retry_is_due(previous, config=config):
                 continue
             try:
-                event = process_signal(config, signal_path=signal_path, signal_payload=signal_payload)
+                event = process_signal(
+                    config,
+                    signal_path=signal_path,
+                    signal_payload=signal_payload,
+                    work_state_cache=work_state_cache,
+                )
             except Exception as exc:  # pragma: no cover - integration failure path
                 event = {
                     "timestamp": iso_utc_now(),
