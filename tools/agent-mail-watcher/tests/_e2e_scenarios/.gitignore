@@ -1,0 +1,5 @@
+# Runtime artifact bundles produced by run_e2e_scenarios.py.
+# Each run lands a per-timestamp directory here; bundles are inspectable
+# locally but should not be committed.
+*
+!.gitignore
