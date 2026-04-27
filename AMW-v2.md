@@ -16,6 +16,7 @@ Add a beads-aware wake gate to `agent-mail-watcher` with this policy:
 - If `open_count == 0`, only `urgent` messages may wake an agent.
 - If `open_count > 0` and `ready_count == 0`, only `high` and `urgent` messages may wake an agent.
 - Otherwise, keep the current wake behavior.
+- `high` never breaks through in the zero-open state; it only wakes in the open-but-zero-ready state.
 
 Non-goals:
 - Do not add text heuristics.
