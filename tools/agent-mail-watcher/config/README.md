@@ -199,6 +199,37 @@ Recommended inspection order after a failure:
    Self-test: paste the absolute `artifact_manifest` path from the command output
    Scripted e2e: paste `tools/agent-mail-watcher/tests/_e2e_scenarios/LATEST_RUN` plus the referenced `summary.json`
 
+### Rollback and troubleshooting
+
+**Fast rollback**
+
+1. Edit `~/.config/agent-mail-watcher/config.json` and set `"beads_gate_enabled": false`.
+2. Restart the watcher service:
+
+```bash
+systemctl --user restart agent-mail-watcher.service
+```
+
+3. Confirm rollback with `agent-mail-watcher status`.
+   The binding should now report `beads_gate_explanation: "policy disabled — pre-v2 wake behavior preserved"` and new wakes should log `skip-policy-disabled` instead of policy suppressions.
+
+**First-response troubleshooting**
+
+| Symptom | Check first | Expected meaning | Next step |
+| --- | --- | --- | --- |
+| Wake was suppressed with `suppress-no-open-beads` | `events.jsonl`, then the binding in `agent-mail-watcher status` | Project had `open_count=0`; only `urgent` would land | Confirm `work_state_open_count`, `work_state_ready_count`, and `beads_gate_explanation`. If the counts are wrong, move to the artifact manifests below. |
+| Wake was suppressed with `suppress-no-ready-beads` | `events.jsonl`, then `agent-mail-watcher status` | Project had open work but nothing ready; only `high` and `urgent` would land | Confirm `work_state_ready_count=0` and inspect the blocker chain in the bead graph. |
+| Event shows `skip-policy-unavailable` | `events.jsonl` and `work_state_error` in `status` | The watcher failed open because `br` data was unavailable or untrusted | This is not a suppression. Inspect the error text, then open the latest e2e or self-test manifest to compare against the known fail-open cases. |
+| Event shows `skip-policy-disabled` | `agent-mail-watcher status` | Policy was intentionally bypassed because the flag is off | No policy bug. Either keep the rollback in place or re-enable the flag and restart after you finish validating. |
+| Signal stays deferred with `deferred-no-owned-pane` or another pre-v2 defer action | `state.json`, then `events.jsonl` | Existing retry semantics are still in control; the gate did not terminally suppress the wake | Check `attempt_count`, `queued_at`, and `retry_exhausted_at` in `state.json` to see whether the watcher is still retrying or has exhausted the signal. |
+| Busy pane was not interrupted | `events.jsonl` for `suppressed-working-pane` | Busy suppression guardrail still won over wake delivery | This is expected. The wake is treated as delivered and no prompt should be injected into the busy pane. |
+
+**Manifest-first inspection order**
+
+1. If the problem came from scripted validation, open `tools/agent-mail-watcher/tests/_e2e_scenarios/LATEST_RUN`, then open the referenced `summary.json`.
+2. If the problem came from `agent-mail-watcher self-test`, open the `artifact_manifest` path printed by the command, then inspect the failing scenario under `artifacts/scenarios/<scenario-id>/manifest.json`.
+3. Use `events.jsonl` and `state.json` after that to confirm whether the watcher treated the signal as terminal suppression, fail-open bypass, or a retryable defer.
+
 ## Retry And Log Caps
 
 - An undelivered signal gets one initial processing attempt plus at most `5` retries.
