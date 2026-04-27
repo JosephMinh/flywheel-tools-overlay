@@ -3548,6 +3548,275 @@ def wait_for_pane_text(pane_id: str, needle: str, *, timeout_seconds: float = 3.
     return last_capture
 
 
+SELF_TEST_ARTIFACT_EVENT_TAIL_LINES = 200
+
+
+def utc_timestamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def path_relative_to(root: pathlib.Path, path: pathlib.Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def read_jsonl(path: pathlib.Path, *, max_lines: int | None = None) -> list[Any]:
+    if not path.exists():
+        return []
+    retained_lines: deque[str] | None = None
+    parsed_lines: list[str] = []
+    if max_lines is not None and max_lines > 0:
+        retained_lines = deque(maxlen=max_lines)
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\n")
+            if retained_lines is not None:
+                retained_lines.append(line)
+            else:
+                parsed_lines.append(line)
+    source_lines = list(retained_lines) if retained_lines is not None else parsed_lines
+    entries: list[Any] = []
+    for line_number, line in enumerate(source_lines, start=1):
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            entries.append(
+                {
+                    "line_number": line_number,
+                    "parse_error": "invalid-jsonl-line",
+                    "raw": line,
+                }
+            )
+    return entries
+
+
+def completed_process_payload(
+    result: subprocess.CompletedProcess[str],
+    *,
+    cwd: str | pathlib.Path | None = None,
+    parse_stdout_json: bool = False,
+) -> dict[str, Any]:
+    args = result.args
+    if isinstance(args, (list, tuple)):
+        argv = [str(arg) for arg in args]
+    else:
+        argv = [str(args)]
+    payload: dict[str, Any] = {
+        "argv": argv,
+        "cwd": str(pathlib.Path(cwd).resolve()) if cwd is not None else None,
+        "returncode": result.returncode,
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+        "captured_at": utc_timestamp(),
+    }
+    if parse_stdout_json:
+        try:
+            payload["stdout_json"] = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            payload["stdout_json_error"] = str(exc)
+    return payload
+
+
+def summarize_test_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for event in events:
+        summary = {
+            "agent_name": event.get("agent_name"),
+            "action": event.get("action"),
+            "selection_source": event.get("selection_source"),
+            "policy_decision": event.get("policy_decision"),
+            "policy_reason": event.get("policy_reason"),
+            "pane_id": event.get("pane_id"),
+            "delivered": event.get("delivered"),
+            "created_new_pane": event.get("created_new_pane"),
+        }
+        summaries.append({key: value for key, value in summary.items() if value is not None})
+    return summaries
+
+
+def watcher_status_command_outcome(config: Config) -> dict[str, Any]:
+    result = run_command(
+        [
+            sys.executable,
+            str(pathlib.Path(__file__).resolve()),
+            "--config",
+            str(config.config_path),
+            "status",
+        ]
+    )
+    return completed_process_payload(result, cwd=config.config_path.parent, parse_stdout_json=True)
+
+
+def workspace_command_outcomes(workspace: pathlib.Path) -> dict[str, Any]:
+    outcomes = {
+        "git_status": completed_process_payload(
+            run_command(["git", "status", "--short", "--branch"], cwd=workspace),
+            cwd=workspace,
+        )
+    }
+    if (workspace / ".beads").is_dir():
+        outcomes["br_stats"] = completed_process_payload(
+            run_command(
+                ["br", "--json", "--no-auto-flush", "--no-auto-import", "stats"],
+                cwd=workspace,
+            ),
+            cwd=workspace,
+            parse_stdout_json=True,
+        )
+    return outcomes
+
+
+class TestArtifactRecorder:
+    def __init__(
+        self,
+        *,
+        root: pathlib.Path,
+        run_id: str,
+        run_kind: str,
+        config_path: pathlib.Path,
+        state_path: pathlib.Path,
+        log_path: pathlib.Path,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.root = root
+        self.run_id = run_id
+        self.run_kind = run_kind
+        self.config_path = config_path
+        self.state_path = state_path
+        self.log_path = log_path
+        self.metadata = dict(metadata or {})
+        self.created_at = utc_timestamp()
+        self.manifest_path = self.root / "manifest.json"
+        self.scenarios_dir = self.root / "scenarios"
+        self.scenarios: list[dict[str, Any]] = []
+        self.scenarios_dir.mkdir(parents=True, exist_ok=True)
+        self._write_manifest(completed=False)
+
+    def _write_manifest(
+        self,
+        *,
+        completed: bool,
+        ok: bool | None = None,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "run_id": self.run_id,
+            "run_kind": self.run_kind,
+            "created_at": self.created_at,
+            "completed": completed,
+            "ok": ok,
+            "metadata": self.metadata,
+            "paths": {
+                "config": path_relative_to(self.root, self.config_path),
+                "watcher_state": path_relative_to(self.root, self.state_path),
+                "watcher_events_log": path_relative_to(self.root, self.log_path),
+            },
+            "scenarios": self.scenarios,
+        }
+        if completed:
+            payload["completed_at"] = utc_timestamp()
+        if summary is not None:
+            payload["summary"] = summary
+        write_json_atomic(self.manifest_path, payload)
+
+    def record_scenario(
+        self,
+        scenario_id: str,
+        description: str,
+        *,
+        config: Config | None = None,
+        workspaces: dict[str, pathlib.Path] | None = None,
+        pane_ids: dict[str, str] | None = None,
+        expected: dict[str, Any] | None = None,
+        actual: dict[str, Any] | None = None,
+        events: list[dict[str, Any]] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        scenario_dir = self.scenarios_dir / scenario_id
+        scenario_dir.mkdir(parents=True, exist_ok=True)
+        recorded_at = utc_timestamp()
+        artifact_paths: dict[str, Any] = {}
+
+        actual_payload = dict(actual or {})
+        if events is not None:
+            actual_payload.setdefault("event_count", len(events))
+            actual_payload.setdefault("event_summary", summarize_test_events(events))
+            events_path = scenario_dir / "events.json"
+            write_json_atomic(events_path, events)
+            artifact_paths["events"] = path_relative_to(self.root, events_path)
+
+        watcher_state_path = scenario_dir / "watcher-state.json"
+        write_json_atomic(watcher_state_path, read_json(self.state_path, {"signals": {}}))
+        artifact_paths["watcher_state"] = path_relative_to(self.root, watcher_state_path)
+
+        watcher_events_tail_path = scenario_dir / "watcher-events-tail.json"
+        write_json_atomic(
+            watcher_events_tail_path,
+            read_jsonl(self.log_path, max_lines=SELF_TEST_ARTIFACT_EVENT_TAIL_LINES),
+        )
+        artifact_paths["watcher_events_tail"] = path_relative_to(self.root, watcher_events_tail_path)
+
+        command_outcomes: dict[str, Any] = {}
+        if config is not None:
+            command_outcomes["watcher_status"] = watcher_status_command_outcome(config)
+        if workspaces:
+            command_outcomes["workspaces"] = {
+                label: workspace_command_outcomes(pathlib.Path(workspace))
+                for label, workspace in workspaces.items()
+            }
+        if command_outcomes:
+            command_outcomes_path = scenario_dir / "command-outcomes.json"
+            write_json_atomic(command_outcomes_path, command_outcomes)
+            artifact_paths["command_outcomes"] = path_relative_to(self.root, command_outcomes_path)
+
+        if pane_ids:
+            pane_captures: dict[str, dict[str, Any]] = {}
+            for label, pane_id in pane_ids.items():
+                capture_path = scenario_dir / "pane-captures" / f"{label}.txt"
+                ensure_parent(capture_path)
+                capture_path.write_text(capture_pane_text(pane_id), encoding="utf-8")
+                pane_captures[label] = {
+                    "pane_id": pane_id,
+                    "path": path_relative_to(self.root, capture_path),
+                }
+            pane_manifest_path = scenario_dir / "pane-captures.json"
+            write_json_atomic(pane_manifest_path, pane_captures)
+            artifact_paths["pane_captures"] = path_relative_to(self.root, pane_manifest_path)
+
+        scenario_manifest_path = scenario_dir / "manifest.json"
+        scenario_manifest = {
+            "scenario_id": scenario_id,
+            "description": description,
+            "status": "passed",
+            "recorded_at": recorded_at,
+            "expected": expected or {},
+            "actual": actual_payload,
+            "extra": extra or {},
+            "paths": {
+                **artifact_paths,
+                "manifest": path_relative_to(self.root, scenario_manifest_path),
+            },
+        }
+        write_json_atomic(scenario_manifest_path, scenario_manifest)
+        self.scenarios.append(scenario_manifest)
+        self._write_manifest(completed=False)
+        return scenario_manifest
+
+    def finalize(self, *, ok: bool) -> None:
+        self._write_manifest(
+            completed=True,
+            ok=ok,
+            summary={
+                "scenario_count": len(self.scenarios),
+                "passed_scenarios": len(self.scenarios),
+            },
+        )
+
+
 def setup_self_test_project(
     *,
     mailbox_root: pathlib.Path,
@@ -3814,6 +4083,48 @@ def command_self_test(config: Config) -> int:
         program="wake-test",
         session_id=None,
     )
+    artifact_recorder = TestArtifactRecorder(
+        root=root / "artifacts",
+        run_id=stamp,
+        run_kind="self-test",
+        config_path=test_config.config_path,
+        state_path=state_path,
+        log_path=log_path,
+        metadata={
+            "root": str(root),
+            "mailbox_root": str(mailbox_root),
+            "signals_dir": str(signals_dir),
+            "session_name": session_name,
+            "session_name_alt": session_name_alt,
+            "workspace": str(workspace),
+            "workspace_alt": str(workspace_alt),
+            "pane_id": pane.pane_id,
+            "pane_id_alt": pane_alt.pane_id,
+        },
+    )
+
+    def record_self_test_scenario(
+        scenario_id: str,
+        description: str,
+        *,
+        workspaces: dict[str, pathlib.Path] | None = None,
+        pane_ids: dict[str, str] | None = None,
+        expected: dict[str, Any] | None = None,
+        actual: dict[str, Any] | None = None,
+        events: list[dict[str, Any]] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        artifact_recorder.record_scenario(
+            scenario_id,
+            description,
+            config=test_config,
+            workspaces=workspaces if workspaces is not None else {"primary": workspace},
+            pane_ids=pane_ids,
+            expected=expected,
+            actual=actual,
+            events=events,
+            extra=extra,
+        )
 
     signal_path = signals_dir / "projects" / project_slug / "agents" / f"{agent_name}.signal"
     signal_path_alt = signals_dir / "projects" / project_slug_alt / "agents" / f"{agent_name}.signal"
@@ -3846,10 +4157,37 @@ def command_self_test(config: Config) -> int:
     first_capture_alt = run_command(["tmux", "capture-pane", "-p", "-t", pane_alt.pane_id]).stdout
     if "First wake" in first_capture_alt:
         raise RuntimeError("self-test leaked a project-specific wake into the wrong tmux pane")
+    record_self_test_scenario(
+        "first-wake",
+        "Deliver the first wake only to the matching bound pane.",
+        workspaces={"primary": workspace, "alternate": workspace_alt},
+        pane_ids={"primary": pane.pane_id, "alternate": pane_alt.pane_id},
+        expected={
+            "subject": "First wake",
+            "importance": "high",
+            "action": "prompted-live-pane",
+            "alternate_leak": False,
+        },
+        actual={
+            "delivered_to_primary": "First wake" in first_capture,
+            "leaked_to_alternate": "First wake" in first_capture_alt,
+        },
+        events=first_events,
+        extra={"project_slug": project_slug, "agent_name": agent_name},
+    )
 
     second_events = scan_once(test_config)
     if second_events:
         raise RuntimeError("self-test dedupe failed; identical signal was processed twice")
+    record_self_test_scenario(
+        "dedupe-identical-signal",
+        "Ignore an unchanged signal on the next scan.",
+        pane_ids={"primary": pane.pane_id},
+        expected={"duplicate_signal_processed": False},
+        actual={"duplicate_signal_processed": bool(second_events)},
+        events=second_events,
+        extra={"project_slug": project_slug, "agent_name": agent_name},
+    )
 
     signal_payload["message"]["id"] = 2
     signal_payload["message"]["subject"] = "Second wake"
@@ -3858,6 +4196,15 @@ def command_self_test(config: Config) -> int:
     third_capture = wait_for_pane_text(pane.pane_id, "Second wake")
     if not third_events or "Second wake" not in third_capture:
         raise RuntimeError("self-test failed to deliver second wake prompt")
+    record_self_test_scenario(
+        "second-wake",
+        "Process a fresh signal id after the dedupe guard.",
+        pane_ids={"primary": pane.pane_id},
+        expected={"subject": "Second wake", "action": "prompted-live-pane"},
+        actual={"delivered_to_primary": "Second wake" in third_capture},
+        events=third_events,
+        extra={"project_slug": project_slug, "agent_name": agent_name},
+    )
 
     busy_agent_name = "BusyTester"
     busy_session_name = f"agent-mail-watcher-busy-{stamp.lower()}"[:48]
@@ -3930,6 +4277,15 @@ def command_self_test(config: Config) -> int:
         raise RuntimeError("self-test failed to suppress a working-pane wake")
     if "Busy wake must be suppressed" in busy_capture:
         raise RuntimeError("self-test injected a wake prompt into a working pane")
+    record_self_test_scenario(
+        "busy-pane-suppression",
+        "Suppress a wake when the target pane is already working.",
+        pane_ids={"busy": busy_pane.pane_id},
+        expected={"action": "suppressed-working-pane", "prompt_injected": False},
+        actual={"prompt_injected": "Busy wake must be suppressed" in busy_capture},
+        events=busy_events,
+        extra={"project_slug": project_slug, "agent_name": busy_agent_name},
+    )
 
     alt_payload = {
         "project": project_slug_alt,
@@ -3949,6 +4305,23 @@ def command_self_test(config: Config) -> int:
     fourth_capture_primary = run_command(["tmux", "capture-pane", "-p", "-t", pane.pane_id]).stdout
     if "Alt project wake" in fourth_capture_primary:
         raise RuntimeError("self-test leaked alternate-project wake into the primary tmux pane")
+    record_self_test_scenario(
+        "alternate-project-routing",
+        "Route an alternate-project wake only to the alternate pane.",
+        workspaces={"primary": workspace, "alternate": workspace_alt},
+        pane_ids={"primary": pane.pane_id, "alternate": pane_alt.pane_id},
+        expected={
+            "subject": "Alt project wake",
+            "action": "prompted-live-pane",
+            "primary_leak": False,
+        },
+        actual={
+            "delivered_to_alternate": "Alt project wake" in fourth_capture,
+            "leaked_to_primary": "Alt project wake" in fourth_capture_primary,
+        },
+        events=fourth_events,
+        extra={"project_slug": project_slug_alt, "agent_name": agent_name},
+    )
 
     consumer_agent_name = "PromptConsumer"
     consumer_session_name = f"agent-mail-watcher-consumer-{stamp.lower()}"[:48]
@@ -4020,6 +4393,19 @@ def command_self_test(config: Config) -> int:
         raise RuntimeError("self-test did not observe the live provider leaving idle after the wake")
     if consumer_verification.get("final_post_send_state") not in PROMPT_CONSUMPTION_STATES:
         raise RuntimeError("self-test live provider did not transition into a recognized active state")
+    record_self_test_scenario(
+        "prompt-consumer",
+        "Capture the prompt-consuming provider path and resulting transition.",
+        pane_ids={"consumer": consumer_pane.pane_id},
+        expected={
+            "action": "prompted-live-pane",
+            "prompt_visible_after_prompt": False,
+            "non_idle_transition_observed": True,
+        },
+        actual={"delivery_verification": consumer_verification},
+        events=consumer_events,
+        extra={"project_slug": project_slug, "agent_name": consumer_agent_name},
+    )
 
     bound_shadow_agent_name = "BoundShadow"
     bound_shadow_session_name = make_session_name(
@@ -4104,6 +4490,25 @@ def command_self_test(config: Config) -> int:
     ).stdout
     if "Bound shadow wake" in unrelated_native_capture:
         raise RuntimeError("self-test leaked a bound-shadow wake into an unrelated native provider pane")
+    record_self_test_scenario(
+        "bound-shadow-routing",
+        "Prefer the explicit binding even when an unrelated native pane exists.",
+        pane_ids={
+            "bound_shadow": bound_shadow_pane.pane_id,
+            "unrelated_native": unrelated_native_pane.pane_id,
+        },
+        expected={
+            "selection_source": "binding",
+            "action": "prompted-live-pane",
+            "unrelated_native_leak": False,
+        },
+        actual={
+            "delivery_verification": bound_shadow_verification,
+            "leaked_to_unrelated_native": "Bound shadow wake" in unrelated_native_capture,
+        },
+        events=bound_shadow_events,
+        extra={"project_slug": project_slug, "agent_name": bound_shadow_agent_name},
+    )
     bound_shadow_signal_path.write_text(
         json.dumps(
             {
@@ -4133,6 +4538,19 @@ def command_self_test(config: Config) -> int:
         raise RuntimeError("self-test reused an older visible wake instead of sending the new wake token")
     if repeat_verification.get("capture_changed_after_prompt") is not True:
         raise RuntimeError("self-test did not observe a new pane capture change for the repeated bound-shadow wake")
+    record_self_test_scenario(
+        "bound-shadow-repeat",
+        "Confirm a repeated bound-shadow wake produces a fresh pane capture.",
+        pane_ids={"bound_shadow": bound_shadow_pane.pane_id},
+        expected={
+            "action": "prompted-live-pane",
+            "prompt_already_visible": False,
+            "capture_changed_after_prompt": True,
+        },
+        actual={"delivery_verification": repeat_verification},
+        events=bound_shadow_repeat_events,
+        extra={"project_slug": project_slug, "agent_name": bound_shadow_agent_name},
+    )
 
     awaiting_agent_name = "AwaitingTester"
     awaiting_session_name = f"awaiting-provider-{stamp.lower()}"[:48]
@@ -4194,6 +4612,15 @@ def command_self_test(config: Config) -> int:
     awaiting_capture = run_command(["tmux", "capture-pane", "-p", "-t", awaiting_pane.pane_id]).stdout
     if "Awaiting-input wake" not in awaiting_capture:
         raise RuntimeError("self-test failed to inject a wake prompt into an awaiting-input pane")
+    record_self_test_scenario(
+        "awaiting-input-wake",
+        "Wake a pane that is waiting for explicit user input.",
+        pane_ids={"awaiting_input": awaiting_pane.pane_id},
+        expected={"action": "prompted-live-pane", "prompt_visible": True},
+        actual={"prompt_visible": "Awaiting-input wake" in awaiting_capture},
+        events=awaiting_events,
+        extra={"project_slug": project_slug, "agent_name": awaiting_agent_name},
+    )
 
     strict_route_agent_name = "StrictRouteTester"
     strict_route_session_name = f"strict-route-good-{stamp.lower()}"[:48]
@@ -4286,6 +4713,25 @@ def command_self_test(config: Config) -> int:
     ).stdout
     if "Strict route rescue" in strict_route_impostor_capture:
         raise RuntimeError("self-test leaked a rescued wake into the impostor pane")
+    record_self_test_scenario(
+        "strict-route-rescue",
+        "Recover from a tampered binding by re-proving ownership from pane metadata.",
+        pane_ids={
+            "strict_route": strict_route_pane.pane_id,
+            "impostor": strict_route_impostor_pane.pane_id,
+        },
+        expected={
+            "selection_source": "pane-metadata",
+            "action": "prompted-live-pane",
+            "impostor_leak": False,
+        },
+        actual={
+            "delivered_to_strict_route_pane": "Strict route rescue" in strict_route_capture,
+            "leaked_to_impostor": "Strict route rescue" in strict_route_impostor_capture,
+        },
+        events=strict_route_events,
+        extra={"project_slug": project_slug, "agent_name": strict_route_agent_name},
+    )
 
     proof_mismatch_agent_name = "ProofMismatchTester"
     proof_mismatch_session_name = f"proof-mismatch-{stamp.lower()}"[:48]
@@ -4352,6 +4798,19 @@ def command_self_test(config: Config) -> int:
     ).stdout
     if "Proof mismatch must defer" in proof_mismatch_capture:
         raise RuntimeError("self-test injected a wake into a pane after its ownership proof was cleared")
+    record_self_test_scenario(
+        "proof-mismatch-defer",
+        "Fail closed on a pane whose ownership proof metadata was cleared.",
+        pane_ids={"proof_mismatch": proof_mismatch_pane.pane_id},
+        expected={
+            "action": "deferred-no-owned-pane",
+            "selection_source": "unbound-native-provider-pane",
+            "prompt_injected": False,
+        },
+        actual={"prompt_injected": "Proof mismatch must defer" in proof_mismatch_capture},
+        events=proof_mismatch_events,
+        extra={"project_slug": project_slug, "agent_name": proof_mismatch_agent_name},
+    )
 
     ambiguous_agent_name = "AmbiguousOwnedTester"
     ambiguous_session_name_a = f"ambiguous-owned-a-{stamp.lower()}"[:48]
@@ -4438,6 +4897,22 @@ def command_self_test(config: Config) -> int:
     ambiguous_capture_b = run_command(["tmux", "capture-pane", "-p", "-t", ambiguous_pane_b.pane_id]).stdout
     if "Ambiguous owned wake" in ambiguous_capture_a or "Ambiguous owned wake" in ambiguous_capture_b:
         raise RuntimeError("self-test injected a wake while ownership was ambiguous")
+    record_self_test_scenario(
+        "ambiguous-owned-pane",
+        "Defer when two panes claim the same owned identity.",
+        pane_ids={"ambiguous_a": ambiguous_pane_a.pane_id, "ambiguous_b": ambiguous_pane_b.pane_id},
+        expected={
+            "action": "deferred-no-owned-pane",
+            "selection_source": "ambiguous-owned-pane",
+            "prompt_injected": False,
+        },
+        actual={
+            "prompt_injected_a": "Ambiguous owned wake" in ambiguous_capture_a,
+            "prompt_injected_b": "Ambiguous owned wake" in ambiguous_capture_b,
+        },
+        events=ambiguous_events,
+        extra={"project_slug": project_slug, "agent_name": ambiguous_agent_name},
+    )
 
     shared_native_agent_name = "SharedNative"
     shared_shadow_agent_name = "SharedShadow"
@@ -4547,6 +5022,26 @@ def command_self_test(config: Config) -> int:
     ).stdout
     if "Shared shadow wake must defer" in shared_shadow_capture:
         raise RuntimeError("self-test injected a wake into a shadow pane after shared-session scrub")
+    record_self_test_scenario(
+        "shared-session-shadow-scrub",
+        "Scrub a poisoned shared-session shadow binding and keep it deferred.",
+        pane_ids={"shared_shadow": shared_shadow_pane.pane_id},
+        expected={
+            "action": "deferred-no-owned-pane",
+            "shadow_identity_cleared": True,
+            "prompt_injected": False,
+        },
+        actual={
+            "shadow_identity_cleared": (
+                not shadow_identity_file.exists()
+                or not shadow_identity_file.read_text(encoding="utf-8").strip()
+            ),
+            "prompt_injected": "Shared shadow wake must defer" in shared_shadow_capture,
+            "shared_shadow_binding": shared_shadow_binding,
+        },
+        events=shared_shadow_events,
+        extra={"project_slug": project_slug, "agent_name": shared_shadow_agent_name},
+    )
     shared_native_signal_path = (
         signals_dir / "projects" / project_slug / "agents" / f"{shared_native_agent_name}.signal"
     )
@@ -4577,6 +5072,18 @@ def command_self_test(config: Config) -> int:
     shared_native_capture = wait_for_pane_text(shared_native_pane.pane_id, "Shared native wake still works")
     if "Shared native wake still works" not in shared_native_capture:
         raise RuntimeError("self-test failed to deliver a wake to the native pane after session scrub")
+    record_self_test_scenario(
+        "shared-session-native-scrub",
+        "Keep the native pane wakeable after the shared-session scrub.",
+        pane_ids={"shared_native": shared_native_pane.pane_id},
+        expected={"action": "prompted-live-pane", "prompt_visible": True},
+        actual={
+            "prompt_visible": "Shared native wake still works" in shared_native_capture,
+            "shared_native_binding": shared_native_binding,
+        },
+        events=shared_native_events,
+        extra={"project_slug": project_slug, "agent_name": shared_native_agent_name},
+    )
 
     auto_create_agent_name = "AutoCreateTester"
     setup_self_test_project(
@@ -4621,6 +5128,20 @@ def command_self_test(config: Config) -> int:
     auto_create_binding = auto_create_bindings.get(binding_key(str(workspace), auto_create_agent_name))
     if not isinstance(auto_create_binding, dict):
         raise RuntimeError("self-test did not persist a binding for the auto-created pane")
+    auto_create_pane_id = str(auto_create_event.get("pane_id") or "")
+    record_self_test_scenario(
+        "auto-create-first-wake",
+        "Bootstrap a missing shell pane and persist its binding.",
+        pane_ids={"auto_create": auto_create_pane_id} if auto_create_pane_id else None,
+        expected={
+            "selection_source": "created-pane",
+            "created_new_pane": True,
+            "action": "launched-or-resumed-shell-pane",
+        },
+        actual={"binding_persisted": isinstance(auto_create_binding, dict)},
+        events=auto_create_events,
+        extra={"project_slug": project_slug, "agent_name": auto_create_agent_name},
+    )
     auto_create_signal_path.write_text(
         json.dumps(
             {
@@ -4649,12 +5170,30 @@ def command_self_test(config: Config) -> int:
         raise RuntimeError("self-test did not reuse the bootstrap pane on the repeated wake")
     if auto_create_repeat_event.get("pane_id") is None:
         raise RuntimeError("self-test did not record the reused pane for the repeated bootstrap wake")
+    auto_create_repeat_pane_id = str(auto_create_repeat_event.get("pane_id") or "")
+    record_self_test_scenario(
+        "auto-create-repeat",
+        "Reuse the bootstrap shell pane on the next wake instead of creating another.",
+        pane_ids={"auto_create": auto_create_repeat_pane_id} if auto_create_repeat_pane_id else None,
+        expected={
+            "created_new_pane": False,
+            "action": "launched-or-resumed-shell-pane",
+        },
+        actual={"reused_pane_id": auto_create_repeat_pane_id},
+        events=auto_create_repeat_events,
+        extra={"project_slug": project_slug, "agent_name": auto_create_agent_name},
+    )
+
+    artifact_recorder.finalize(ok=True)
 
     print(
         json.dumps(
             {
                 "ok": True,
                 "root": str(root),
+                "artifact_root": str(artifact_recorder.root),
+                "artifact_manifest": str(artifact_recorder.manifest_path),
+                "artifact_scenario_count": len(artifact_recorder.scenarios),
                 "session_name": session_name,
                 "session_name_alt": session_name_alt,
                 "pane_key": pane.composite_key,
@@ -4664,6 +5203,7 @@ def command_self_test(config: Config) -> int:
                 "events_first": first_events,
                 "events_second": second_events,
                 "events_third": third_events,
+                "events_busy": busy_events,
                 "events_fourth": fourth_events,
                 "events_bound_shadow": bound_shadow_events,
                 "events_bound_shadow_repeat": bound_shadow_repeat_events,
