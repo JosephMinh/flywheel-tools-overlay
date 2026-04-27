@@ -3505,6 +3505,15 @@ def setup_self_test_project(
     )
 
 
+def setup_self_test_beads_repo(workspace: pathlib.Path) -> pathlib.Path:
+    workspace.mkdir(parents=True, exist_ok=True)
+    if not (workspace / ".git").is_dir():
+        run_command(["git", "init", "-q"], cwd=workspace)
+    if not (workspace / ".beads").is_dir():
+        run_command(["br", "init"], cwd=workspace)
+    return workspace
+
+
 def create_self_test_pane(
     *,
     session_name: str,
@@ -3575,8 +3584,8 @@ def command_self_test(config: Config) -> int:
     bindings_path = root / "bindings.json"
     workspace = root / "workspace"
     workspace_alt = root / "workspace-alt"
-    workspace.mkdir(parents=True, exist_ok=True)
-    workspace_alt.mkdir(parents=True, exist_ok=True)
+    setup_self_test_beads_repo(workspace)
+    setup_self_test_beads_repo(workspace_alt)
 
     project_slug = "watcher-selftest"
     project_slug_alt = "watcher-selftest-alt"
