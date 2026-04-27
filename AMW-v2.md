@@ -27,6 +27,7 @@ Non-goals:
 - Resolve the target pane first, then inspect the repo state for that pane.
 - Read work state from the pane's checkout when possible, not only the canonical project path.
 - Use `br` as the source of truth for counts.
+- Treat missing, ambiguous, or otherwise untrusted repo/DB resolution as unavailable. An explicit but wrong or missing `--db` path can yield misleading zero-count summaries, so those counts must not drive suppression.
 - Suppressed-by-policy signals must be treated as processed and must not retry.
 - Existing busy suppression, ownership checks, and provider-identity checks must remain intact.
 - Text-based prompt-state checks are only for live terminal consumption state, not project work counts. Past-tense recap markers such as `churned for`, `brewed for`, `worked for`, and similar completed-action phrases count as idle history, not active work; treating them as active suppresses legitimate wakes.
