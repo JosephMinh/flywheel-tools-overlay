@@ -1984,9 +1984,13 @@ def binding_matches_pane(binding: dict[str, Any] | None, pane: PaneInfo) -> bool
     if expected_pid and pane.pid != expected_pid:
         return False
     project_key = str(binding.get("project_key") or "").strip()
+    metadata_matches = binding_metadata_matches_pane(binding, pane)
     if project_key and not path_matches_project_workspace(pane.current_path, project_key):
-        return False
-    return binding_metadata_matches_pane(binding, pane)
+        # Explicit manual bindings can legitimately target a coordinator shell
+        # outside the project tree. Preserve them when the pane metadata still
+        # proves ownership instead of pruning them as inactive.
+        return metadata_matches
+    return metadata_matches
 
 
 def binding_claimed_by_other_agent(
