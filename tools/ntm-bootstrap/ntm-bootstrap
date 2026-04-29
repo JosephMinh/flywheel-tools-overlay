@@ -528,31 +528,78 @@ def tmux_session_exists(name: str) -> bool:
     return proc.returncode == 0
 
 
-def detect_prompt_pane(session: str) -> int:
-    proc = run_command(
-        ["tmux", "list-panes", "-t", session, "-F", "#{pane_index}\t#{pane_title}"],
-        timeout=20,
-        check=True,
-    )
-    panes: list[tuple[int, str]] = []
-    for raw_line in proc.stdout.splitlines():
-        if not raw_line.strip():
-            continue
-        parts = raw_line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        try:
-            pane_index = int(parts[0])
-        except ValueError:
-            continue
-        panes.append((pane_index, parts[1]))
+def detect_prompt_pane(
+    session: str,
+    *,
+    wait_seconds: float = 0.0,
+    poll_interval: float = 0.5,
+) -> int:
+    """Return the pane index that should receive the planning prompt.
 
-    if not panes:
-        raise BootstrapError(f"no panes found in tmux session {session!r}")
+    Picks the lowest pane index whose title contains "__" (the marker the
+    agent CLIs use, e.g. ``myproject__cod_1``). When ``wait_seconds > 0``
+    and no agent-titled pane is visible yet, polls every
+    ``poll_interval`` seconds until one appears or the deadline elapses.
 
-    agent_panes = [pane_index for pane_index, title in panes if "__" in title]
-    if agent_panes:
-        return min(agent_panes)
+    Why the wait: ``ntm spawn`` returns once tmux panes exist, but the
+    agent CLIs (claude / codex / gemini) launching inside those panes
+    take a few seconds to start and set their pane titles. Without
+    polling, this function used to snapshot tmux right after spawn,
+    find no "__" titles, and silently fall back to the lowest pane
+    index — usually pane 0, the *user* pane — so the planning prompt
+    landed in the wrong place and the agent pane was left untouched.
+    The user-visible symptom was "second pane was created but no agent
+    spawned, prompt did not land".
+
+    On timeout with ``wait_seconds > 0`` we raise instead of silently
+    falling back, so a real spawn failure surfaces clearly. The
+    no-wait fallback is preserved for callers attaching to a
+    pre-existing session where agents may legitimately not have the
+    expected title format.
+    """
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    last_panes: list[tuple[int, str]] = []
+    while True:
+        proc = run_command(
+            ["tmux", "list-panes", "-t", session, "-F", "#{pane_index}\t#{pane_title}"],
+            timeout=20,
+            check=True,
+        )
+        panes: list[tuple[int, str]] = []
+        for raw_line in proc.stdout.splitlines():
+            if not raw_line.strip():
+                continue
+            parts = raw_line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                pane_index = int(parts[0])
+            except ValueError:
+                continue
+            panes.append((pane_index, parts[1]))
+        last_panes = panes
+
+        if not panes:
+            raise BootstrapError(f"no panes found in tmux session {session!r}")
+
+        agent_panes = [pane_index for pane_index, title in panes if "__" in title]
+        if agent_panes:
+            return min(agent_panes)
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(poll_interval)
+
+    if wait_seconds > 0:
+        title_summary = ", ".join(
+            f"{idx}:{title!r}" for idx, title in last_panes
+        )
+        raise BootstrapError(
+            f"no agent-titled pane (title containing '__') appeared in tmux "
+            f"session {session!r} within {wait_seconds:.1f}s after `ntm spawn`. "
+            f"This usually means the agent CLI failed to launch in its pane. "
+            f"Pane titles seen: [{title_summary}]"
+        )
     return min(pane_index for pane_index, _ in panes)
 
 
@@ -1093,7 +1140,21 @@ def main() -> int:
             raise BootstrapError("cannot send the planning prompt without an existing session when --no-spawn is set")
 
         if plan_abs_path is not None:
-            result.prompt_pane = args.pane if args.pane is not None else detect_prompt_pane(args.project_name)
+            if args.pane is not None:
+                result.prompt_pane = args.pane
+            else:
+                # When we just freshly spawned the session, agent CLIs need a
+                # few seconds to start and title their panes; poll for them so
+                # the planning prompt lands on the agent pane instead of
+                # silently falling back to the user pane (pane 0). When the
+                # session was reused, agents are already running and titled,
+                # so the immediate-snapshot path is fine.
+                wait_seconds = (
+                    30.0 if result.session_spawned and not args.dry_run else 0.0
+                )
+                result.prompt_pane = detect_prompt_pane(
+                    args.project_name, wait_seconds=wait_seconds
+                )
 
         result.session_attached = handle_post_spawn_interaction(
             session=args.project_name,
