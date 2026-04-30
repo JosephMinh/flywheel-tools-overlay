@@ -5,6 +5,7 @@ Wants=agent-mail.service
 
 [Service]
 Type=simple
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/bin:/home/ubuntu/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/home/ubuntu/.local/bin/agent-mail-watcher watch
 WorkingDirectory=/home/ubuntu
 Restart=always
